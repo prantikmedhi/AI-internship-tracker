@@ -1,0 +1,12 @@
+python-telegram-bot
+notion-client
+requests
+python-dotenv
+PyMuPDF
+python-docx
+openpyxl
+pandas
+python-pptx
+playwright
+beautifulsoup4
+google-generativeai

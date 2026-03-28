@@ -32,6 +32,7 @@ from internship_agent.jobs import search_internships
 from internship_agent.notion.profile import get_user_profile
 from internship_agent.llm import rank_all, extract_search_keywords
 from internship_agent.log.logger import log
+import re
 
 # Load environment
 load_dotenv()
@@ -79,6 +80,95 @@ SYSTEM_PROMPT = """You are a general-purpose AI assistant for Notion, controlled
 ✅ "Here's your resume summary: [actual summary]"
 ❌ "Row added to database 32f89966-2ae5-8132-b42f-e89393af5150"
 """
+
+# =============================================================================
+# NATURAL LANGUAGE PROCESSING HELPERS
+# =============================================================================
+
+def is_greeting(message: str) -> bool:
+    """Detect if message is a greeting."""
+    greetings = [
+        "hi", "hello", "hey", "hola", "namaste",
+        "greetings", "yo", "what's up", "wassup",
+        "good morning", "good afternoon", "good evening",
+    ]
+    message_lower = message.lower().strip()
+    return any(msg in message_lower for msg in greetings) and len(message_lower) < 20
+
+def parse_internship_query(message: str) -> tuple[str, str]:
+    """
+    Parse natural language internship search queries.
+
+    Examples:
+    - "I want to search internship in UK" → ("internship", "UK")
+    - "find python developer roles in india" → ("python developer", "india")
+    - "search for frontend jobs london" → ("frontend", "london")
+
+    Returns: (keywords, location)
+    """
+    message_lower = message.lower()
+
+    # Common location words
+    locations = {
+        "uk": "UK", "united kingdom": "UK",
+        "us": "USA", "usa": "USA", "united states": "USA",
+        "india": "India", "bangalore": "Bangalore", "mumbai": "Mumbai", "delhi": "Delhi",
+        "london": "London", "manchester": "Manchester", "glasgow": "Glasgow",
+        "canada": "Canada", "toronto": "Toronto", "vancouver": "Vancouver",
+        "australia": "Australia", "sydney": "Sydney", "melbourne": "Melbourne",
+        "singapore": "Singapore", "dubai": "Dubai", "uae": "UAE",
+        "germany": "Germany", "france": "France", "japan": "Japan",
+        "remote": "Remote", "work from home": "Remote",
+    }
+
+    # Extract location from message
+    location = ""
+    for loc_key, loc_name in locations.items():
+        if loc_key in message_lower:
+            location = loc_name
+            break
+
+    # Remove common phrases to extract keywords
+    keywords = message_lower
+    remove_phrases = [
+        "i want to", "i'm looking for", "i am looking for",
+        "search", "find", "find me", "show me",
+        "internship", "internships", "job", "jobs",
+        "in ", " in", "at ", " at",
+        "please", "can you", "could you",
+        "positions", "role", "roles",
+        "opportunity", "opportunities",
+    ]
+
+    for phrase in remove_phrases:
+        keywords = keywords.replace(phrase, " ")
+
+    # Also remove extracted location from keywords
+    if location:
+        keywords = keywords.replace(location.lower(), " ")
+
+    # Clean up stopwords
+    stopwords = {
+        "a", "an", "the", "and", "or", "but", "is", "are", "am",
+        "for", "to", "of", "with", "on", "from", "as", "by",
+        "me", "my", "i", "you", "your", "we", "they", "it",
+    }
+
+    words = [w.strip() for w in keywords.split() if w.strip() and len(w.strip()) > 2 and w.strip() not in stopwords]
+    keywords = " ".join(words) if words else "internship"
+
+    return keywords.strip(), location.strip()
+
+def get_greeting_response() -> str:
+    """Generate a friendly greeting response."""
+    greetings = [
+        "👋 Hey there! Ready to find your next internship?",
+        "👋 Hi! I can help you find internships. Just tell me what you're looking for!",
+        "👋 Hello! Want to search for internships or explore your Notion workspace?",
+        "👋 Hey! Looking for internships? Tell me what role and location you're interested in!",
+    ]
+    import random
+    return random.choice(greetings)
 
 # =============================================================================
 # TELEGRAM COMMANDS
@@ -219,10 +309,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     Handle free-form messages - intelligently search Notion and respond.
 
     Supports:
-    - "find internship" → Searches for internships
-    - "search <keyword>" → Searches Notion
-    - "read <database>" → Reads database
-    - Any other message → Smart Notion search
+    - Greetings: "hi", "hello", etc. → Friendly response
+    - Internship queries: "find python in india", "I want internship in UK" → Searches and ranks
+    - Generic search: "search <keyword>" → Searches Notion
+    - Database read: "read <database>" → Reads database
+    - Any other message → Smart Notion search or greeting
     """
     user_message = update.message.text.strip()
     chat_id = update.effective_chat.id
@@ -240,8 +331,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # ─── DETECT USER INTENT ─────────────────────────────────────────────
         message_lower = user_message.lower()
 
+        # Intent 0: Greeting
+        if is_greeting(user_message):
+            response = get_greeting_response()
+            await status_msg.edit_text(response)
+            return
+
         # Intent 1: Find/Search Internships (Profile-First + AI Ranking)
-        if any(word in message_lower for word in ["find intern", "search intern", "internship", "job"]):
+        # Check for explicit internship keywords OR natural language internship queries
+        is_internship_query = any(word in message_lower for word in ["find intern", "search intern", "internship", "job", "role"])
+        is_natural_language = any(phrase in message_lower for phrase in ["want to", "looking for", "search for", "find me"])
+
+        if is_internship_query or (is_natural_language and any(word in message_lower for word in ["intern", "job", "role", "position"])):
 
             # ── Step 1: Read user profile ───────────────────────────────────────
             await status_msg.edit_text("📊 Reading your Notion profile...")
@@ -263,30 +364,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 except Exception as e:
                     log.warning(f"scan_and_sync_profile failed: {e}")
 
-            # ── Step 2: Extract search keywords from profile + hint ─────────────
-            await status_msg.edit_text("🧠 Extracting search keywords from your profile...")
+            # ── Step 2: Extract search keywords from message and profile ──────
+            await status_msg.edit_text("🧠 Extracting search keywords...")
             keywords = ""
             location = ""
+
+            # Try natural language parsing first
             try:
-                keywords, location, reason = extract_search_keywords(profile, hint=user_message)
-                log.info(f"LLM keywords: '{keywords}', location: '{location}', reason: {reason}")
+                parsed_keywords, parsed_location = parse_internship_query(user_message)
+                if parsed_keywords and parsed_keywords != "internship":
+                    keywords = parsed_keywords
+                    location = parsed_location
+                    log.info(f"Parsed keywords: '{keywords}', location: '{location}'")
             except Exception as e:
-                log.warning(f"extract_search_keywords failed: {e}")
+                log.warning(f"parse_internship_query failed: {e}")
 
-            # Fallback: manual parse if LLM fails
+            # If natural language parsing didn't get keywords, use LLM
             if not keywords:
-                temp = user_message.lower()
-                temp = temp.replace("find internship", "").replace("find intern", "").replace("search internship", "").replace("search", "").strip()
-                stopwords = {"a", "an", "the", "and", "or", "but", "in", "at", "for", "to", "is", "please", "find", "search", "me", "my", "i", "you", "can"}
-                location_codes = {"uk", "us", "ca", "au", "de", "fr", "sg", "jp", "ae", "nz", "india", "remote"}
-                words = [w for w in temp.split() if (len(w) > 2 and w not in stopwords) or (len(w) <= 2 and w in location_codes)]
-                keywords = " ".join(words) if words else "internship"
-                if not location:
-                    for loc in location_codes:
-                        if loc in temp:
-                            location = loc
-                            break
+                try:
+                    keywords, location, reason = extract_search_keywords(profile, hint=user_message)
+                    log.info(f"LLM keywords: '{keywords}', location: '{location}', reason: {reason}")
+                except Exception as e:
+                    log.warning(f"extract_search_keywords failed: {e}")
 
+            # Final fallback
             if not keywords or keywords.isspace():
                 keywords = "software engineering intern"
 
@@ -377,15 +478,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
             if words:
                 query = " ".join(words[:3])  # Use top 3 keywords
-                response = f"🔍 Searching for: **{query}**\n\n"
+                response = f"🔍 Searching your Notion for: **{query}**\n\n"
                 response += search_workspace(query, notion)
             else:
+                # No clear intent - provide helpful guidance
                 response = (
-                    "ℹ️  I didn't understand that. Try:\n"
-                    "• `find internship` - Search for internships\n"
-                    "• `search <keyword>` - Search Notion\n"
+                    "👋 I can help you with a few things:\n\n"
+                    "**Search for Internships:**\n"
+                    "• \"find python internship\"\n"
+                    "• \"I want to search for frontend jobs in UK\"\n"
+                    "• \"find machine learning internship in india\"\n\n"
+                    "**Notion Commands:**\n"
+                    "• `search <keyword>` - Search your Notion workspace\n"
                     "• `read <database>` - Read a database\n"
-                    "• `/help` - See all commands"
+                    "• `show <page>` - Show a page content\n\n"
+                    "Or just tell me what you're looking for! 😊"
                 )
 
         # ─── SEND RESPONSE ──────────────────────────────────────────────────

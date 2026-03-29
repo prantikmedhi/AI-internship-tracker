@@ -8,9 +8,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "bot:dev": "tsx telegram-server.ts",
+    "bot:dev": "tsx --env-file=.env.local telegram-server.ts",
     "bot:build": "tsc --project tsconfig.bot.json --outDir dist/bot",
-    "bot:start": "node dist/bot/telegram-server.js",
+    "bot:start": "node --env-file=.env.local dist/bot/telegram-server.js",
     "dev:all": "concurrently \"npm run dev\" \"npm run bot:dev\""
   },
   "dependencies": {

@@ -30,7 +30,7 @@ export async function rankJob(
       return null;
     }
 
-    const ranking = result as RankingResult;
+    const ranking = result as unknown as RankingResult;
 
     return {
       ...job,

@@ -3,7 +3,17 @@
   "compilerOptions": {
     "lib": ["esnext"],
     "module": "NodeNext",
-    "target": "ES2022"
+    "target": "ES2022",
+    "moduleResolution": "node",
+    "allowJs": true,
+    "esModuleInterop": true,
+    "paths": {
+      "@/*": ["./*"]
+    }
+  },
+  "ts-node": {
+    "esm": true,
+    "experimentalEsm": true
   },
   "include": ["telegram-server.ts", "bot/**/*", "lib/**/*"]
 }

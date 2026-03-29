@@ -23,13 +23,29 @@ bot.use(session({
   }),
 }));
 
-// TODO: Add command handlers
-// bot.command('start', startHandler);
-// bot.command('help', helpHandler);
-// ... etc
+// Import handlers
+import {
+  startHandler,
+  helpHandler,
+  searchHandler,
+  readHandler,
+  profileHandler,
+  workspaceHandler,
+  logoutHandler,
+} from './handlers/commands';
+import { messageHandler } from './handlers/messages';
 
-// TODO: Add message handler
-// bot.on('message:text', messageHandler);
+// Register command handlers
+bot.command('start', startHandler);
+bot.command('help', helpHandler);
+bot.command('search', searchHandler);
+bot.command('read', readHandler);
+bot.command('profile', profileHandler);
+bot.command('workspace', workspaceHandler);
+bot.command('logout', logoutHandler);
+
+// Register message handler (free text)
+bot.on('message:text', messageHandler);
 
 // Error handler
 bot.catch((err) => {

@@ -32,7 +32,11 @@ export interface SavedJob extends RankedJob {
 // User Profile Types
 export interface UserProfile {
   name: string;
+  email?: string;
+  location?: string;
+  experienceLevel?: string;
   skills: string[];
+  tools?: string[];
   experience: string;
   education: string[];
   projects: string[];
@@ -210,4 +214,13 @@ export interface SearchProgressEvent {
   message: string;
   status: 'pending' | 'processing' | 'complete' | 'error';
   data?: Record<string, unknown>;
+}
+
+// Workspace Overview Type
+export interface WorkspaceOverview {
+  name: string;
+  databases: Array<{ id: string; name: string; url?: string }>;
+  recentPages: Array<{ id: string; title: string; url?: string }>;
+  users: Array<{ id: string; name: string; email?: string }>;
+  totalPages: number;
 }

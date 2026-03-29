@@ -178,18 +178,3 @@ export function createMCPClient(
   return new MCPClient(accessToken, serverUrl);
 }
 
-/**
- * Singleton MCP client for long-running processes (like Telegram bot)
- */
-let botMCPClient: MCPClient | null = null;
-
-export function getBotMCPClient(): MCPClient {
-  if (!botMCPClient) {
-    const token = process.env.NOTION_TOKEN;
-    if (!token) {
-      throw new Error('NOTION_TOKEN environment variable is required for bot MCP client');
-    }
-    botMCPClient = new MCPClient(token);
-  }
-  return botMCPClient;
-}

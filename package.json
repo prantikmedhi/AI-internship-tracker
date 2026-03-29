@@ -1,13 +1,14 @@
 {
   "name": "notion-internship-agent",
   "version": "0.1.0",
+  "type": "module",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "bot:dev": "ts-node --project tsconfig.bot.json telegram-server.ts",
+    "bot:dev": "tsx telegram-server.ts",
     "bot:build": "tsc --project tsconfig.bot.json --outDir dist/bot",
     "bot:start": "node dist/bot/telegram-server.js",
     "dev:all": "concurrently \"npm run dev\" \"npm run bot:dev\""
@@ -34,6 +35,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.2.1",
     "tailwindcss": "^4",
+    "tsx": "^4.21.0",
     "typescript": "^5"
   }
 }

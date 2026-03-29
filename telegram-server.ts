@@ -1,6 +1,7 @@
 /**
- * Telegram Bot Entry Point
- * Standalone Node.js process for running the Grammy bot
+ * Telegram Bot Standalone Entry Point
+ * Optional: Run the bot in a separate process for debugging or production
+ * (In development, the bot runs inside Next.js via instrumentation.ts)
  */
 
 import 'dotenv/config';
@@ -11,19 +12,18 @@ async function main() {
     throw new Error('TELEGRAM_BOT_TOKEN environment variable is required');
   }
 
-  if (!process.env.NOTION_TOKEN) {
-    throw new Error('NOTION_TOKEN environment variable is required');
-  }
-
-  console.log('🤖 Starting Telegram Bot...');
-  console.log(`📱 Bot token configured`);
-  console.log(`💾 Notion token configured`);
+  console.log('[bot:standalone] 🤖 Starting Telegram Bot (standalone)...');
+  console.log('[bot:standalone] Note: For development, use "npm run dev" instead');
 
   try {
-    console.log('Starting bot listener...');
-    await bot.start();
+    await bot.start({
+      onStart: (botInfo) => {
+        console.log(`[bot:standalone] ✅ Running as @${botInfo.username}`);
+        console.log('[bot:standalone] Listening for messages...');
+      },
+    });
   } catch (error) {
-    console.error('❌ Failed to start bot:', error);
+    console.error('[bot:standalone] ❌ Fatal error:', error);
     process.exit(1);
   }
 }

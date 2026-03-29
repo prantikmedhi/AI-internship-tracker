@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["esnext"],
+    "module": "NodeNext",
+    "target": "ES2022"
+  },
+  "include": ["telegram-server.ts", "bot/**/*", "lib/**/*"]
+}

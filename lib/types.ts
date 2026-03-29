@@ -52,6 +52,13 @@ export interface NotionSession {
 }
 
 export interface TelegramSession {
+  // OAuth token for Notion access
+  notionToken: string;
+  email?: string;
+  workspace?: string;
+  expiresAt: Date;
+
+  // Chat session data
   lastResults: RankedJob[];
   lastQuery: string;
   lastLocation: string;

@@ -122,36 +122,175 @@ export async function searchHandler(ctx: BotContext) {
       return;
     }
 
-    // Step 1: Get user profile
-    try {
-      await ctx.api.editMessageText(chatId, statusMsg.message_id, '1️⃣ Reading your profile...');
-      const profile = await getUserProfile(client, session.workspace || '');
-    } catch (e) {
-      // Profile read optional for search
+    // Step 1: Scrape external sources
+    await ctx.api.editMessageText(chatId, statusMsg.message_id, '1️⃣ Scraping external sources...');
+    
+    // Extract keyword and optional location
+    const parts = query.split(' ');
+    const keyword = parts[0];
+    const location = parts.length > 1 ? parts.slice(1).join(' ') : 'remote';
+    
+    // Import scrapeAllSources
+    const { scrapeAllSources } = await import('../../lib/jobs/scraper');
+    const jobs = await scrapeAllSources(keyword, location);
+    
+    if (jobs.length === 0) {
+      await ctx.api.editMessageText(chatId, statusMsg.message_id, `❌ No jobs found for "${query}".`);
+      return;
     }
-
-    // Step 2: Search workspace
-    await ctx.api.editMessageText(chatId, statusMsg.message_id, '2️⃣ Searching workspace...');
-    const results = await searchWorkspace(client, query);
-
-    // Step 3: Format results
-    const resultCount = results.length;
-    let response = `✅ Found ${resultCount} results:\n\n`;
-    results.slice(0, 5).forEach((result, i) => {
-      response += `${i + 1}. ${result.title || 'Untitled'}\n`;
+    
+    await ctx.api.editMessageText(chatId, statusMsg.message_id, `2️⃣ Found ${jobs.length} jobs. Formatting results...`);
+    
+    let response = `✅ Discovered ${jobs.length} internships:\n\n`;
+    jobs.slice(0, 5).forEach((job, i) => {
+      response += `${i + 1}. **${job.role}** at _${job.company}_\n📍 ${job.location}\n🌐 [Apply Link](${job.url})\n\n`;
     });
-    if (resultCount > 5) {
-      response += `\n... and ${resultCount - 5} more`;
+    if (jobs.length > 5) {
+      response += `\n... and ${jobs.length - 5} more`;
     }
-
-    await ctx.api.editMessageText(chatId, statusMsg.message_id, response);
-
-    // Store in session for future reference
-    ctx.session.lastResults = results;
+    
+    await ctx.api.editMessageText(chatId, statusMsg.message_id, response, { parse_mode: 'Markdown' });
+    
+    // Background auto-save to Notion
+    if (session.trackerDatabaseId) {
+      const dbStatusMsg = await ctx.reply('⏳ Auto-saving to your Notion Internship Tracker...');
+      let savedCount = 0;
+      for (const job of jobs.slice(0, 10)) { // Limit to top 10
+        try {
+          const props = {
+            "Role": { title: [{ text: { content: job.role.substring(0, 2000) } }] },
+            "Company": { rich_text: [{ text: { content: job.company.substring(0, 2000) } }] },
+            "Location": { rich_text: [{ text: { content: job.location.substring(0, 2000) } }] },
+            "URL": { url: job.url },
+            "Source": { select: { name: ["linkedin", "internshala", "remoteok"].includes(job.source) ? (job.source.toLowerCase() === 'linkedin' ? 'LinkedIn' : job.source.toLowerCase() === 'internshala' ? 'Internshala' : 'RemoteOK') : 'Other' } },
+            "Status": { select: { name: "Discovered" } },
+            "Date Added": { date: { start: new Date().toISOString() } }
+          };
+          
+          await client.callTool('notion-create-pages', {
+            parent: { database_id: session.trackerDatabaseId },
+            properties: props
+          });
+          savedCount++;
+        } catch (err) {
+          console.error(`Failed to save job ${job.role}:`, err);
+        }
+      }
+      await ctx.api.editMessageText(chatId, dbStatusMsg.message_id, `✅ Successfully saved ${savedCount} jobs to your tracker database!`);
+    } else {
+      await ctx.reply('💡 Tip: Send /setup_tracker <Notion_Page_URL> to auto-save these jobs to your workspace next time!');
+    }
+    
+    ctx.session.lastResults = jobs as any;
     ctx.session.lastQuery = query;
   } catch (error) {
     console.error('Search error:', error);
     await ctx.reply('❌ Search failed. Please try again.');
+  }
+}
+
+// /setup_tracker command
+export async function setupTrackerHandler(ctx: BotContext) {
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  if (!isTelegramUserAuthenticated(userId)) {
+    await ctx.reply('🔐 Please authenticate first with /start');
+    return;
+  }
+
+  const session = getTelegramSession(userId);
+  if (!session?.notionToken) return;
+  const client = createMCPClient(session.notionToken);
+
+  const chatId = ctx.chat?.id;
+  if (!chatId) return;
+
+  // Handle potential Grammy match object vs simple string
+  const matchStr = Array.isArray(ctx.match) ? ctx.match.join(' ') : String(ctx.match || '');
+  const url = matchStr.trim();
+  
+  let pageId = '';
+
+  if (url) {
+    if (!url.includes('notion.so/')) {
+      await ctx.reply('Usage: /setup_tracker <Notion_Page_URL>\nExample: /setup_tracker https://notion.so/My-Dashboard-a1b2...');
+      return;
+    }
+    // Extract UUID from URL
+    const match = url.match(/([a-f0-9]{32})/i) || url.match(/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i);
+    if (!match) {
+      await ctx.reply('❌ Invalid Notion URL. Could not extract Page ID.');
+      return;
+    }
+    let rawId = match[1].replace(/-/g, '');
+    pageId = `${rawId.substr(0,8)}-${rawId.substr(8,4)}-${rawId.substr(12,4)}-${rawId.substr(16,4)}-${rawId.substr(20)}`;
+  } else {
+    // Auto-discover the first page available in the workspace
+    await ctx.reply('🔍 Auto-discovering Notion Workspace...');
+    const { searchWorkspace } = await import('../../lib/mcp/tools');
+    const results = await searchWorkspace(client, '', 'last_edited_time');
+    
+    // Natively, `notion-search` returns results. They might have an `id` or `url` containing the ID.
+    // We try to find any item that has an id
+    const candidate = results.find(r => r.id);
+    if (candidate && candidate.id) {
+       pageId = candidate.id;
+       await ctx.reply(`🎯 Found candidate page (${candidate.title || 'Untitled'}). Generating Database inside it...`);
+    } else {
+       await ctx.reply('❌ Could not auto-discover any Pages. Make sure you shared a Page with your Integration. Try providing a direct URL: /setup_tracker <URL>.');
+       return;
+    }
+  }
+  
+  try {
+    const statusMsg = await ctx.reply('⚙️ Creating Internship Tracker database...');
+    
+    const schema = {
+      "Role": { "title": {} },
+      "Company": { "rich_text": {} },
+      "Location": { "rich_text": {} },
+      "URL": { "url": {} },
+      "Source": {
+        "select": {
+          "options": [
+            { "name": "LinkedIn", "color": "blue" },
+            { "name": "Internshala", "color": "purple" },
+            { "name": "RemoteOK", "color": "gray" },
+            { "name": "Other", "color": "default" }
+          ]
+        }
+      },
+      "Status": {
+        "select": {
+          "options": [
+            { "name": "Discovered", "color": "yellow" },
+            { "name": "Applied", "color": "blue" },
+            { "name": "Interviewing", "color": "orange" },
+            { "name": "Rejected", "color": "red" },
+            { "name": "Offer", "color": "green" }
+          ]
+        }
+      },
+      "Date Added": { "date": {} },
+      "Applied": { "checkbox": {} }
+    };
+    
+    const result = await client.callTool<{ id: string }>('notion-create-database', {
+      parent: { page_id: pageId },
+      title: [{ type: 'text', text: { content: "Internship Tracker" } }],
+      properties: schema,
+    });
+    
+    if (result && result.id) {
+       session.trackerDatabaseId = result.id;
+       storeTelegramSession(userId, session);
+       await ctx.api.editMessageText(chatId, statusMsg.message_id, `✅ Success! Your Internship Tracker has been created.\n\nFrom now on, /search will automatically populate internships directly into this database!`);
+    } else {
+       await ctx.api.editMessageText(chatId, statusMsg.message_id, `❌ Failed to create database. Make sure you have shared the Notion page with the integration!`);
+    }
+  } catch (error) {
+    console.error('Setup tracker error:', error);
+    await ctx.reply(`❌ Setup failed: ${(error as Error).message}`);
   }
 }
 
@@ -168,7 +307,8 @@ export async function readHandler(ctx: BotContext) {
     return;
   }
 
-  const query = ctx.match?.trim();
+  const queryMatchStr = Array.isArray(ctx.match) ? ctx.match.join(' ') : String(ctx.match || '');
+  const query = queryMatchStr.trim();
   if (!query) {
     await ctx.reply('Usage: /read <page_id_or_query>');
     return;

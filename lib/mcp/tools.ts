@@ -13,8 +13,8 @@ export async function searchWorkspace(
   client: MCPClient,
   query: string,
   sortBy?: 'relevance' | 'last_edited_time'
-): Promise<Array<{ title?: string; url?: string; type?: string }>> {
-  const result = await client.callTool<{ results?: Array<{ title?: string; url?: string }> }>(
+): Promise<Array<{ title?: string; url?: string; type?: string; id?: string }>> {
+  const result = await client.callTool<{ results?: Array<{ title?: string; url?: string; id?: string; type?: string }> }>(
     'notion-search',
     {
       query,

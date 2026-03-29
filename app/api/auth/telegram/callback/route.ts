@@ -10,7 +10,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { consumePKCEByState } from '@/lib/stores/pkce-store';
 import { exchangeCodeForToken, getNotionUserInfo } from '@/lib/notion/oauth';
-import { storeTelegramSession } from '@/lib/telegram-session';
+import { storeTelegramSession, getTelegramSession } from '@/lib/telegram-session';
+import { createMCPClient } from '@/lib/mcp/client';
+import { searchWorkspace } from '@/lib/mcp/tools';
 
 export async function GET(request: NextRequest) {
   try {
@@ -93,6 +95,83 @@ export async function GET(request: NextRequest) {
       lastResults: [],
       lastQuery: '',
       lastLocation: '',
+    });
+    
+    // Asynchronous Auto-Tracker Setup
+    // Send immediate response to browser, handle setup in background
+    Promise.resolve().then(async () => {
+      try {
+        const botToken = process.env.TELEGRAM_BOT_TOKEN;
+        const sendTgMsg = async (text: string) => {
+          if (!botToken) return;
+          await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: telegramUserId, text })
+          }).catch(console.error);
+        };
+
+        await sendTgMsg('⚙️ Login successful! Auto-discovering Notion Workspace to build your Internship Tracker...');
+        
+        const client = createMCPClient(tokenResponse.access_token);
+        const results = await searchWorkspace(client, '', 'last_edited_time');
+        
+        const candidate = results.find(r => r.id);
+        if (!candidate || !candidate.id) {
+          await sendTgMsg('❌ Could not auto-discover any Pages. Please make sure you shared a Page with your Integration, then use /setup_tracker <URL>.');
+          return;
+        }
+
+        const pageId = candidate.id;
+        await sendTgMsg(`🎯 Found parent page: "${candidate.title || 'Untitled'}". Generating database...`);
+
+        const schema = {
+          "Role": { "title": {} },
+          "Company": { "rich_text": {} },
+          "Location": { "rich_text": {} },
+          "URL": { "url": {} },
+          "Source": {
+            "select": {
+              "options": [
+                { "name": "LinkedIn", "color": "blue" },
+                { "name": "Internshala", "color": "purple" },
+                { "name": "RemoteOK", "color": "gray" },
+                { "name": "Other", "color": "default" }
+              ]
+            }
+          },
+          "Status": {
+            "select": {
+              "options": [
+                { "name": "Discovered", "color": "yellow" },
+                { "name": "Applied", "color": "blue" },
+                { "name": "Interviewing", "color": "orange" },
+                { "name": "Rejected", "color": "red" },
+                { "name": "Offer", "color": "green" }
+              ]
+            }
+          },
+          "Date Added": { "date": {} },
+          "Applied": { "checkbox": {} }
+        };
+
+        const result = await client.callTool<{ id: string }>('notion-create-database', {
+          parent: { page_id: pageId },
+          title: [{ type: 'text', text: { content: "Internship Tracker" } }],
+          properties: schema,
+        });
+
+        if (result && result.id) {
+          const updatedSession = getTelegramSession(telegramUserId);
+          if (updatedSession) {
+            updatedSession.trackerDatabaseId = result.id;
+            storeTelegramSession(telegramUserId, updatedSession);
+          }
+          await sendTgMsg('✅ Database created! You can now send /search <keyword> to automatically fill it!');
+        }
+      } catch (err) {
+        console.error('Auto-setup error:', err);
+      }
     });
 
     // Return HTML page the user sees in their browser

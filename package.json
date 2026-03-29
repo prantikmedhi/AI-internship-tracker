@@ -11,7 +11,7 @@
     "bot:dev": "tsx --env-file=.env.local telegram-server.ts",
     "bot:build": "tsc --project tsconfig.bot.json --outDir dist/bot",
     "bot:start": "node --env-file=.env.local dist/bot/telegram-server.js",
-    "dev:all": "concurrently \"npm run dev\" \"npm run bot:dev\""
+    "dev:all": "npm run dev"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.28.0",
@@ -22,6 +22,7 @@
     "grammy": "^1.41.1",
     "jose": "^6.2.2",
     "next": "16.2.1",
+    "playwright": "^1.58.2",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "ts-node": "^10.9.2",

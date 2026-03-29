@@ -1,36 +1,12 @@
 /**
  * Notion OAuth 2.0 PKCE flow helpers
- * Connects to https://mcp.notion.com/.well-known/oauth-authorization-server
+ * Connects to Standard Notion API endpoints
  */
 
-import { OAuthServerMetadata, TokenResponse } from '@/lib/types';
+import { TokenResponse } from '@/lib/types';
 
-const MCP_WELL_KNOWN_URL = 'https://mcp.notion.com/.well-known/oauth-authorization-server';
-
-let cachedMetadata: OAuthServerMetadata | undefined = undefined;
-
-/**
- * Fetch OAuth server metadata from Notion's well-known endpoint
- */
-export async function getOAuthServerMetadata(): Promise<OAuthServerMetadata> {
-  if (cachedMetadata) {
-    return cachedMetadata;
-  }
-
-  try {
-    const response = await fetch(MCP_WELL_KNOWN_URL);
-    if (!response.ok) {
-      throw new Error(`Failed to fetch OAuth metadata: ${response.statusText}`);
-    }
-
-    const metadata = await response.json();
-    cachedMetadata = metadata as OAuthServerMetadata;
-    return metadata;
-  } catch (error) {
-    console.error('Failed to get OAuth server metadata:', error);
-    throw error;
-  }
-}
+const NOTION_AUTH_URL = 'https://api.notion.com/v1/oauth/authorize';
+const NOTION_TOKEN_URL = 'https://api.notion.com/v1/oauth/token';
 
 /**
  * Build the OAuth authorization URL
@@ -42,19 +18,15 @@ export async function buildAuthorizationURL(
   state: string,
   scope?: string
 ): Promise<URL> {
-  const metadata = await getOAuthServerMetadata();
-
-  const authUrl = new URL(metadata.authorization_endpoint);
+  const authUrl = new URL(NOTION_AUTH_URL);
   authUrl.searchParams.append('client_id', clientId);
   authUrl.searchParams.append('redirect_uri', redirectUri);
   authUrl.searchParams.append('response_type', 'code');
-  authUrl.searchParams.append('code_challenge', codeChallenge);
-  authUrl.searchParams.append('code_challenge_method', 'S256');
-  authUrl.searchParams.append('state', state);
+  authUrl.searchParams.append('owner', 'user');
 
-  if (scope) {
-    authUrl.searchParams.append('scope', scope);
-  }
+  // Notion API doesn't fully support PKCE natively in standard OAuth yet, 
+  // but if we pass it, it ignores what it doesn't need.
+  authUrl.searchParams.append('state', state);
 
   return authUrl;
 }
@@ -69,29 +41,27 @@ export async function exchangeCodeForToken(
   clientId: string,
   clientSecret: string
 ): Promise<TokenResponse> {
-  const metadata = await getOAuthServerMetadata();
-
+  const cleanClientId = clientId.trim();
+  const cleanClientSecret = clientSecret.trim();
+  const base64Auth = Buffer.from(`${cleanClientId}:${cleanClientSecret}`).toString('base64');
+  
   try {
-    const response = await fetch(metadata.token_endpoint, {
+    const response = await fetch(NOTION_TOKEN_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Accept: 'application/json',
-        Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
+        Authorization: `Basic ${base64Auth}`,
       },
       body: JSON.stringify({
         grant_type: 'authorization_code',
         code,
         redirect_uri: redirectUri,
-        client_id: clientId,
-        client_secret: clientSecret,
-        code_verifier: codeVerifier,
       }),
     });
 
     if (!response.ok) {
       const error = await response.json();
-      throw new Error(`Token exchange failed: ${error.error} - ${error.error_description}`);
+      throw new Error(`Token exchange failed: ${error.error} - ${error.error_description || error.message}`);
     }
 
     return await response.json();
@@ -109,23 +79,21 @@ export async function refreshAccessToken(
   clientId: string,
   clientSecret: string
 ): Promise<TokenResponse> {
-  const metadata = await getOAuthServerMetadata();
-
-  const params = new URLSearchParams({
-    grant_type: 'refresh_token',
-    refresh_token: refreshToken,
-    client_id: clientId,
-  });
+  const cleanClientId = clientId.trim();
+  const cleanClientSecret = clientSecret.trim();
+  const base64Auth = Buffer.from(`${cleanClientId}:${cleanClientSecret}`).toString('base64');
 
   try {
-    const response = await fetch(metadata.token_endpoint, {
+    const response = await fetch(NOTION_TOKEN_URL, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        Accept: 'application/json',
-        Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
+        'Content-Type': 'application/json',
+        Authorization: `Basic ${base64Auth}`,
       },
-      body: params.toString(),
+      body: JSON.stringify({
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken,
+      }),
     });
 
     if (!response.ok) {
@@ -133,7 +101,7 @@ export async function refreshAccessToken(
       if (error.error === 'invalid_grant') {
         throw new Error('Refresh token expired or invalid. User must re-authenticate.');
       }
-      throw new Error(`Token refresh failed: ${error.error} - ${error.error_description}`);
+      throw new Error(`Token refresh failed: ${error.error} - ${error.error_description || error.message}`);
     }
 
     return await response.json();

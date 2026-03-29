@@ -66,6 +66,7 @@ export interface TelegramSession {
   lastResults: RankedJob[];
   lastQuery: string;
   lastLocation: string;
+  trackerDatabaseId?: string;
 }
 
 // Notion Database Row Type

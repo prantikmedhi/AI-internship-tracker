@@ -17,6 +17,7 @@ export async function rankJob(
     const prompt = RANKING_PROMPT.replace('{skills}', profile.skills.join(', '))
       .replace('{experience}', profile.experience)
       .replace('{careerGoal}', profile.careerGoal)
+      .replace('{preferences}', JSON.stringify(profile.preferences))
       .replace('{education}', profile.education.join(', '))
       .replace('{company}', job.company)
       .replace('{role}', job.role)
@@ -56,19 +57,26 @@ const BACKEND_ROLE  = /backend|back-end|back end|\bapi\b|\bserver\b|database|dev
 const FULLSTACK_ROLE = /full.?stack|software engineer|software developer|\bsde\b|\bswe\b|programmer|full stack dev/i;
 const DATA_ROLE     = /data (science|engineer|analyst)|machine learning|ml engineer|\bai engineer|\bai intern|\bai\b.*intern|nlp|deep learning|generative ai|llm engineer/i;
 const MOBILE_ROLE   = /mobile|android|ios|flutter|react native/i;
+const CREATIVE_ROLE = /designer|video editor|motion graphics|artist|creative|photographer/i;
+const MARKETING_ROLE = /marketing|social media|seo\b|content strategist|growth/i;
 
 const FRONTEND_SKILLS = new Set(['react', 'next.js', 'nextjs', 'vue', 'angular', 'svelte', 'javascript', 'typescript', 'html', 'css', 'tailwind', 'redux', 'graphql', 'jquery']);
 const BACKEND_SKILLS  = new Set(['python', 'ruby', 'java', 'go', 'golang', 'node', 'nodejs', 'django', 'rails', 'flask', 'fastapi', 'express', 'spring', 'php', 'rust', 'c#', '.net', 'sql', 'postgresql', 'mysql', 'mongodb', 'redis', 'kafka', 'docker', 'kubernetes']);
 const DATA_SKILLS     = new Set(['python', 'r', 'sql', 'tensorflow', 'pytorch', 'pandas', 'numpy', 'scikit-learn', 'spark', 'tableau', 'powerbi', 'machine learning', 'deep learning', 'nlp', 'ai systems', 'artificial intelligence', 'ai', 'ml', 'llm', 'generative ai', 'langchain']);
 const MOBILE_SKILLS   = new Set(['react native', 'flutter', 'swift', 'kotlin', 'android', 'ios', 'dart']);
+const CREATIVE_SKILLS = new Set(['figma', 'adobe', 'photoshop', 'illustrator', 'premiere', 'after effects', 'canva', 'ui/ux', 'motion graphics', 'video editing', 'blender']);
+const MARKETING_SKILLS = new Set(['google ads', 'meta ads', 'seo', 'sem', 'content writing', 'email marketing', 'copywriting', 'analytics', 'hubspot']);
 
 function inferMatchFromRole(role: string, skills: string[]): string[] {
   const inferred: string[] = [];
-  const isFront    = FRONTEND_ROLE.test(role);
-  const isBack     = BACKEND_ROLE.test(role);
-  const isFull     = FULLSTACK_ROLE.test(role);
-  const isData     = DATA_ROLE.test(role);
-  const isMobile   = MOBILE_ROLE.test(role);
+  const rl = role.toLowerCase();
+  const isFront    = FRONTEND_ROLE.test(rl);
+  const isBack     = BACKEND_ROLE.test(rl);
+  const isFull     = FULLSTACK_ROLE.test(rl);
+  const isData     = DATA_ROLE.test(rl);
+  const isMobile   = MOBILE_ROLE.test(rl);
+  const isCreative = CREATIVE_ROLE.test(rl);
+  const isMarketing = MARKETING_ROLE.test(rl);
 
   for (const skill of skills) {
     const sl = skill.toLowerCase();
@@ -76,6 +84,8 @@ function inferMatchFromRole(role: string, skills: string[]): string[] {
     if ((isBack  || isFull) && BACKEND_SKILLS.has(sl))  inferred.push(skill);
     if (isData                && DATA_SKILLS.has(sl))    inferred.push(skill);
     if (isMobile              && MOBILE_SKILLS.has(sl))  inferred.push(skill);
+    if (isCreative            && CREATIVE_SKILLS.has(sl)) inferred.push(skill);
+    if (isMarketing           && MARKETING_SKILLS.has(sl)) inferred.push(skill);
   }
   return [...new Set(inferred)];
 }
@@ -89,23 +99,38 @@ function inferMatchFromRole(role: string, skills: string[]): string[] {
 function keywordRank(profile: UserProfile, job: JobListing): RankedJob {
   const haystack = [job.role, job.description, ...(job.tags ?? [])].join(' ').toLowerCase();
 
-  // Direct matches (skill literally appears in text)
-  let matchedSkills = profile.skills.filter(s => haystack.includes(s.toLowerCase()));
+  // Direct matches (skill literally appears in text, or partial match for tech terms)
+  let matchedSkills = profile.skills.filter(s => {
+    const sl = s.toLowerCase();
+    // Whole word match or clear inclusion (e.g. "React" in "React.js" or "React/Next")
+    const regex = new RegExp(`\\b${sl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+    return regex.test(haystack) || (sl.length > 3 && haystack.includes(sl));
+  });
 
   // Role-category inference when description is empty / no direct match
   if (matchedSkills.length === 0) {
     matchedSkills = inferMatchFromRole(job.role, profile.skills);
   }
 
-  const prefRole = (profile.preferences as Record<string, string>)?.preferredRole || '';
+  const prefRole = String((profile?.preferences as any)?.preferredRole || '');
   const roleMatch = prefRole
     ? prefRole.toLowerCase().split(/\s+/).some(w => w.length > 2 && job.role.toLowerCase().includes(w))
     : true;
 
-  const score =
-    matchedSkills.length === 0
-      ? 0
-      : Math.min(40 + matchedSkills.length * 7 + (roleMatch ? 10 : 0), 95);
+  const prefLoc = String((profile?.preferences as any)?.preferredLocation || '');
+  const locationMatch = !prefLoc || prefLoc.toLowerCase() === 'any' || 
+    job.location.toLowerCase().includes(prefLoc.toLowerCase()) || 
+    job.location.toLowerCase().includes('remote');
+
+  let score = matchedSkills.length === 0 ? 0 : 40 + matchedSkills.length * 7;
+  
+  if (score > 0) {
+    if (roleMatch) score += 10;
+    if (locationMatch) score += 10;
+    else score -= 15; // Penalty for wrong location
+  }
+
+  score = Math.max(0, Math.min(score, 95));
 
   return {
     ...job,
@@ -114,7 +139,7 @@ function keywordRank(profile: UserProfile, job: JobListing): RankedJob {
     missingSkills: profile.skills.filter(s => !matchedSkills.includes(s)).slice(0, 4),
     whyFits:
       matchedSkills.length > 0
-        ? `Matched skills: ${matchedSkills.join(', ')}`
+        ? `Matched skills: ${matchedSkills.join(', ')}${!locationMatch ? ' (Location gap)' : ''}`
         : 'No skill overlap found',
   };
 }

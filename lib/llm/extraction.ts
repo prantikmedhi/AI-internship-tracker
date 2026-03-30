@@ -20,7 +20,8 @@ export async function extractSearchKeywords(
   try {
     const prompt = KEYWORD_EXTRACTION_PROMPT.replace('{userMessage}', userMessage)
       .replace('{skills}', profile.skills.join(', '))
-      .replace('{careerGoal}', profile.careerGoal);
+      .replace('{careerGoal}', profile.careerGoal)
+      .replace('{preferences}', JSON.stringify(profile.preferences));
 
     const result = await callLLMAndParseJSON(prompt);
 

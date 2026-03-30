@@ -4,12 +4,13 @@
  */
 
 export const RANKING_PROMPT = `
-You are an expert job matching specialist. Analyze the following job against the user's profile and provide a structured JSON response.
+You are an expert job matching specialist. Analyze the following job against the user's profile and preferences. Provide a structured JSON response.
 
 ## User Profile
 - **Skills**: {skills}
 - **Experience Level**: {experience}
 - **Career Goal**: {careerGoal}
+- **Preferences**: {preferences}
 - **Education**: {education}
 
 ## Job Details
@@ -45,6 +46,7 @@ The user sent this message: "{userMessage}"
 The user's profile shows:
 - Skills: {skills}
 - Career Goal: {careerGoal}
+- Preferences: {preferences}
 
 Extract the job search parameters the user is looking for. Respond with ONLY valid JSON:
 {

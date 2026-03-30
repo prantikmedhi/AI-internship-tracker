@@ -60,11 +60,11 @@ export async function exchangeCodeForToken(
     });
 
     if (!response.ok) {
-      const error = await response.json();
+      const error = (await response.json()) as Record<string, any>;
       throw new Error(`Token exchange failed: ${error.error} - ${error.error_description || error.message}`);
     }
 
-    return await response.json();
+    return (await response.json()) as TokenResponse;
   } catch (error) {
     console.error('Token exchange error:', error);
     throw error;
@@ -97,14 +97,14 @@ export async function refreshAccessToken(
     });
 
     if (!response.ok) {
-      const error = await response.json();
+      const error = (await response.json()) as Record<string, any>;
       if (error.error === 'invalid_grant') {
         throw new Error('Refresh token expired or invalid. User must re-authenticate.');
       }
       throw new Error(`Token refresh failed: ${error.error} - ${error.error_description || error.message}`);
     }
 
-    return await response.json();
+    return (await response.json()) as TokenResponse;
   } catch (error) {
     console.error('Token refresh error:', error);
     throw error;

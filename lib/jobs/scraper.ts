@@ -1,149 +1,217 @@
 /**
- * Job scraping utilities for Internshala, LinkedIn, RemoteOK
+ * Job scraping utilities — Playwright-first with fetch fallback
+ * Priority order: LinkedIn → RemoteOK → Internshala
+ *
+ * Playwright is loaded via dynamic import() inside each function, NOT at module top-level.
+ * This prevents the module from crashing if Chromium binaries aren't installed —
+ * only the individual source fails, the rest continue.
  */
 
 import { JobListing } from '@/lib/types';
-import { chromium, Page } from 'playwright';
 
-const MAX_RESULTS = parseInt(process.env.MAX_RESULTS_PER_SOURCE || '5');
+const MAX_RESULTS = parseInt(process.env.MAX_RESULTS_PER_SOURCE || '5', 10);
 
-/**
- * Scrape internships from Internshala using Playwright
- */
-export async function scrapeInternshala(
-  keyword: string,
-  location: string
-): Promise<JobListing[]> {
+const UA =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ' +
+  '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+// ─── LinkedIn ────────────────────────────────────────────────────────────────
+
+export async function scrapeLinkedIn(keyword: string, location: string): Promise<JobListing[]> {
   const jobs: JobListing[] = [];
   try {
-    const formattedKeyword = encodeURIComponent(keyword.toLowerCase().replace(/\s+/g, '-'));
-    
-    let url = `https://internshala.com/internships/work-from-home-${formattedKeyword}-internships/`;
-    if (location && location.toLowerCase() !== 'remote') {
-      const formattedLoc = encodeURIComponent(location.toLowerCase().replace(/\s+/g, '-'));
-      url = `https://internshala.com/internships/${formattedKeyword}-internships-in-${formattedLoc}/`;
-    }
-
-    console.log(`[Scraper] Launching Chromium for Internshala: ${url}`);
+    const { chromium } = await import('playwright');
     const browser = await chromium.launch({ headless: true });
-    const page = await browser.newPage();
-    
-    // Set user agent to avoid basic blocks
-    await page.setExtraHTTPHeaders({
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    const context = await browser.newContext({
+      userAgent: UA,
+      locale: 'en-US',
     });
+    const page = await context.newPage();
 
+    const url =
+      `https://www.linkedin.com/jobs/search/?` +
+      `keywords=${encodeURIComponent(keyword + ' internship')}&` +
+      `location=${encodeURIComponent(location || 'India')}&` +
+      `f_JT=I&sortBy=R`;
+
+    console.log(`[LinkedIn] Fetching: ${url}`);
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    
-    // Wait for internship containers
-    await page.waitForSelector('.individual_internship', { timeout: 10000 }).catch(() => {
-      console.log('No internships found on Internshala or timeout.');
-    });
 
-    const listings = await page.$$('.individual_internship');
-    
-    for (const listing of listings.slice(0, MAX_RESULTS)) {
+    // Wait for job cards — LinkedIn may render as .base-card or .jobs-search__results-list items
+    await page
+      .waitForSelector('.base-card', { timeout: 10000 })
+      .catch(() => console.log('[LinkedIn] Timeout waiting for .base-card'));
+
+    const cards = await page.$$('.base-card');
+    console.log(`[LinkedIn] Found ${cards.length} cards`);
+
+    for (const card of cards.slice(0, MAX_RESULTS)) {
       try {
-        const titleEl = await listing.$('.job-internship-name');
-        const companyEl = await listing.$('.company-name');
-        const locationEl = await listing.$('.locations');
-        const linkEl = await listing.$('a.job-title-href');
-        
-        const title = (await titleEl?.innerText()) || '';
-        const company = (await companyEl?.innerText()) || '';
-        const loctext = (await locationEl?.innerText()) || 'Remote';
-        const href = (await linkEl?.getAttribute('href')) || '';
-        
-        if (title && company) {
+        const role =
+          (await card.$eval('.base-search-card__title', el => el.textContent?.trim()).catch(() => '')) || '';
+        const company =
+          (await card.$eval('.base-search-card__subtitle', el => el.textContent?.trim()).catch(() => '')) || '';
+        const loc =
+          (await card.$eval('.job-search-card__location', el => el.textContent?.trim()).catch(() => '')) || location;
+        const href =
+          (await card.$eval('a.base-card__full-link', el => (el as HTMLAnchorElement).href).catch(() => '')) || '';
+
+        if (role && company) {
           jobs.push({
-            role: title.trim(),
+            role: role.trim(),
             company: company.trim(),
-            location: loctext.trim(),
-            description: '', // Internshala requires clicking for description, skipped for MVP
-            url: href.startsWith('http') ? href : `https://internshala.com${href}`,
-            source: 'internshala',
-            tags: []
+            location: loc.trim(),
+            description: '',
+            url: href || url,
+            source: 'linkedin',
+            tags: [],
           });
         }
-      } catch (e) {
-        console.error('Error parsing individual Internshala listing:', e);
+      } catch {
+        // skip bad card
       }
     }
-    
+
     await browser.close();
+    console.log(`[LinkedIn] Scraped ${jobs.length} jobs`);
     return jobs;
-  } catch (error) {
-    console.error('Internshala scrape error:', error);
+  } catch (err) {
+    console.error('[LinkedIn] Playwright error:', err instanceof Error ? err.message : err);
     return jobs;
   }
 }
 
-/**
- * Scrape internships from LinkedIn
- */
-export async function scrapeLinkedIn(
-  keyword: string,
-  location: string
-): Promise<JobListing[]> {
-  try {
-    // For MVP, return empty array as LinkedIn requires complex proxy/auth bypasses
-    return [];
-  } catch (error) {
-    console.error('LinkedIn scrape error:', error);
-    return [];
-  }
-}
+// ─── RemoteOK ────────────────────────────────────────────────────────────────
 
-/**
- * Scrape from RemoteOK API (no authentication needed)
- */
 export async function scrapeRemoteOK(keyword: string): Promise<JobListing[]> {
   try {
-    const response = await fetch(`https://remoteok.io/api?tag=${encodeURIComponent(keyword)}`);
+    const url = `https://remoteok.io/api?tag=${encodeURIComponent(keyword)}`;
+    console.log(`[RemoteOK] Fetching: ${url}`);
 
-    if (!response.ok) {
-      throw new Error(`RemoteOK API error: ${response.statusText}`);
-    }
+    const res = await fetch(url, {
+      headers: { 'User-Agent': UA },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-    const data = (await response.json()) as unknown[];
+    const data = (await res.json()) as unknown[];
     if (!Array.isArray(data)) return [];
 
     const jobs: JobListing[] = [];
     for (const item of data) {
       if (typeof item !== 'object' || item === null) continue;
-
       const job = item as Record<string, unknown>;
-      if (!job.title || !job.company) continue;
+      if (!job.company) continue;
+      const role = String(job.position || job.title || '');
+      if (!role) continue;
 
       jobs.push({
         company: String(job.company),
-        role: String(job.title),
+        role,
         location: job.location ? String(job.location) : 'Remote',
-        description: job.description ? String(job.description).slice(0, 500) : '',
-        url: job.url ? String(job.url) : '',
+        description: job.description
+          ? String(job.description).replace(/<[^>]+>/g, '').slice(0, 500)
+          : '',
+        url: job.url ? String(job.url) : 'https://remoteok.io',
         source: 'remoteok',
-        tags: job.tag ? [String(job.tag)] : [],
+        tags: Array.isArray(job.tags) ? (job.tags as string[]).slice(0, 5) : [],
       });
+
+      if (jobs.length >= MAX_RESULTS) break;
     }
 
-    return jobs.slice(0, MAX_RESULTS);
-  } catch (error) {
-    console.error('RemoteOK scrape error:', error);
+    console.log(`[RemoteOK] Scraped ${jobs.length} jobs`);
+    return jobs;
+  } catch (err) {
+    console.error('[RemoteOK] Error:', err instanceof Error ? err.message : err);
     return [];
   }
 }
 
+// ─── Internshala ─────────────────────────────────────────────────────────────
+
+export async function scrapeInternshala(keyword: string, location: string): Promise<JobListing[]> {
+  const jobs: JobListing[] = [];
+  try {
+    const { chromium } = await import('playwright');
+    const browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    await page.setExtraHTTPHeaders({ 'User-Agent': UA });
+
+    const slug = keyword.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+    const locSlug = location.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+
+    const url =
+      location && location.toLowerCase() !== 'remote'
+        ? `https://internshala.com/internships/${slug}-internships-in-${locSlug}/`
+        : `https://internshala.com/internships/work-from-home-${slug}-internships/`;
+
+    console.log(`[Internshala] Fetching: ${url}`);
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+    await page
+      .waitForSelector('.individual_internship', { timeout: 10000 })
+      .catch(() => console.log('[Internshala] Timeout waiting for listings'));
+
+    const listings = await page.$$('.individual_internship');
+    console.log(`[Internshala] Found ${listings.length} listings`);
+
+    for (const listing of listings.slice(0, MAX_RESULTS)) {
+      try {
+        const role =
+          (await listing.$eval('.job-internship-name', el => el.textContent?.trim()).catch(() => '')) ||
+          (await listing.$eval('.profile a', el => el.textContent?.trim()).catch(() => '')) ||
+          '';
+        const company =
+          (await listing.$eval('.company-name', el => el.textContent?.trim()).catch(() => '')) || '';
+        const loc =
+          (await listing.$eval('.locations', el => el.textContent?.trim()).catch(() => '')) || location;
+        const href =
+          (await listing.$eval('a.view_detail_button', el => (el as HTMLAnchorElement).href).catch(() => '')) ||
+          (await listing.$eval('a.job-title-href', el => (el as HTMLAnchorElement).href).catch(() => '')) ||
+          '';
+
+        if (role && company) {
+          jobs.push({
+            role: role.trim(),
+            company: company.trim(),
+            location: loc.trim(),
+            description: '',
+            url: href.startsWith('http') ? href : `https://internshala.com${href}`,
+            source: 'internshala',
+            tags: [],
+          });
+        }
+      } catch {
+        // skip bad listing
+      }
+    }
+
+    await browser.close();
+    console.log(`[Internshala] Scraped ${jobs.length} jobs`);
+    return jobs;
+  } catch (err) {
+    console.error('[Internshala] Playwright error:', err instanceof Error ? err.message : err);
+    return jobs;
+  }
+}
+
+// ─── Aggregate ───────────────────────────────────────────────────────────────
+
 /**
- * Scrape from multiple sources in parallel
+ * Scrape all sources in parallel. Priority: LinkedIn → RemoteOK → Internshala.
+ * Each source failure is isolated.
  */
-export async function scrapeAllSources(
-  keyword: string,
-  location: string
-): Promise<JobListing[]> {
-  const [internshala, remoteok] = await Promise.all([
-    scrapeInternshala(keyword, location),
-    scrapeRemoteOK(keyword),
+export async function scrapeAllSources(keyword: string, location: string): Promise<JobListing[]> {
+  const [linkedin, remoteok, internshala] = await Promise.all([
+    scrapeLinkedIn(keyword, location).catch(() => [] as JobListing[]),
+    scrapeRemoteOK(keyword).catch(() => [] as JobListing[]),
+    scrapeInternshala(keyword, location).catch(() => [] as JobListing[]),
   ]);
 
-  return [...internshala, ...remoteok];
+  console.log(
+    `[Scraper] Results — LinkedIn: ${linkedin.length}, RemoteOK: ${remoteok.length}, Internshala: ${internshala.length}`
+  );
+
+  return [...linkedin, ...remoteok, ...internshala];
 }

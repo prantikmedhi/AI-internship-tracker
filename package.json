@@ -10,7 +10,7 @@
     "lint": "eslint",
     "bot:dev": "tsx --env-file=.env.local telegram-server.ts",
     "bot:build": "tsc --project tsconfig.bot.json --outDir dist/bot",
-    "bot:start": "node --env-file=.env.local dist/bot/telegram-server.js",
+    "bot:start": "tsx --env-file=.env.local telegram-server.ts",
     "dev:all": "npm run dev"
   },
   "dependencies": {

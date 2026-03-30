@@ -4,7 +4,7 @@
  */
 
 import { MCPClient } from './client';
-import { NotionPage, NotionDatabase, RankedJob } from '@/lib/types';
+import { NotionPage, NotionDatabase } from '@/lib/types';
 
 /**
  * Search the Notion workspace (full-text search across pages, databases, and connected sources)
@@ -12,17 +12,68 @@ import { NotionPage, NotionDatabase, RankedJob } from '@/lib/types';
 export async function searchWorkspace(
   client: MCPClient,
   query: string,
-  sortBy?: 'relevance' | 'last_edited_time'
-): Promise<Array<{ title?: string; url?: string; type?: string; id?: string }>> {
-  const result = await client.callTool<{ results?: Array<{ title?: string; url?: string; id?: string; type?: string }> }>(
+  options: {
+    sortBy?: 'relevance' | 'last_edited_time';
+    filter?: { property: 'object'; value: 'page' | 'database' };
+    pageSize?: number;
+    startCursor?: string;
+    connectedSources?: boolean;
+  } = {}
+): Promise<{
+  results: Array<{ title?: string; url?: string; type?: string; id?: string; [key: string]: unknown }>;
+  nextCursor?: string | null;
+  hasMore?: boolean;
+}> {
+  const { sortBy, filter, pageSize, startCursor, connectedSources } = options;
+  
+  const result = await client.callTool<{
+    results?: Array<{ title?: string; url?: string; id?: string; type?: string; [key: string]: unknown }>;
+    next_cursor?: string | null;
+    has_more?: boolean;
+  }>(
     'notion-search',
     {
       query,
-      sort: sortBy ? { direction: 'descending', timestamp: sortBy } : undefined,
+      sort: sortBy === 'last_edited_time' ? { direction: 'descending', timestamp: 'last_edited_time' } : undefined,
+      ...(filter && { filter }),
+      ...(pageSize && { page_size: pageSize }),
+      ...(startCursor && { start_cursor: startCursor }),
+      ...(connectedSources !== undefined && { connected_sources: connectedSources }),
     }
   );
 
-  return result.results || [];
+  return {
+    results: result.results || [],
+    nextCursor: result.next_cursor || null,
+    hasMore: result.has_more || false,
+  };
+}
+
+/**
+ * Query multiple data sources for structured results (requires Notion AI + Enterprise)
+ */
+export async function queryDataSources(
+  client: MCPClient,
+  query: string,
+  options: {
+    dataSourceIds?: string[];
+    pageSize?: number;
+  } = {}
+): Promise<{ results: Array<Record<string, unknown>> }> {
+  try {
+    const result = await client.callTool<{ results?: Array<Record<string, unknown>> }>(
+      'notion-query-data-sources',
+      {
+        query,
+        ...(options.dataSourceIds && { data_source_ids: options.dataSourceIds }),
+        ...(options.pageSize && { page_size: options.pageSize }),
+      }
+    );
+    return { results: result.results || [] };
+  } catch (error) {
+    console.error('Failed to query data sources:', error);
+    return { results: [] };
+  }
 }
 
 /**
@@ -238,15 +289,15 @@ export async function queryDatabase(
   sorts?: Array<{ property: string; direction: 'ascending' | 'descending' }>
 ): Promise<{ results?: Array<{ id: string; properties: Record<string, unknown> }> }> {
   try {
-    const result = await client.callTool(
-      'notion-fetch',
+    const result = await client.callTool<{ results?: Array<{ id: string; properties: Record<string, unknown> }> }>(
+      'notion-query-database',
       {
-        id: databaseId,
+        database_id: databaseId,
         ...(filter && { filter }),
         ...(sorts && { sorts }),
       }
     );
-    return result;
+    return result as { results?: Array<{ id: string; properties: Record<string, unknown> }> };
   } catch (error) {
     console.error(`Failed to query database ${databaseId}:`, error);
     return { results: [] };
@@ -259,16 +310,19 @@ export async function queryDatabase(
 export async function getBlockChildren(
   client: MCPClient,
   blockId: string
-): Promise<Array<{ id: string; type: string }>> {
+): Promise<{ results: Array<{ id: string; type: string }>; text: string }> {
   try {
-    const result = await client.callTool<{ results?: Array<{ id: string; type: string }> }>(
-      'notion-fetch',
-      { id: blockId }
+    const result = await client.callTool<{ results?: Array<{ id: string; type: string }>; text?: string }>(
+      'notion-get-block-children',
+      { block_id: blockId, page_size: 100 }
     );
-    return result.results || [];
+    return {
+      results: result.results || [],
+      text: result.text || '',
+    };
   } catch (error) {
     console.error(`Failed to get block children for ${blockId}:`, error);
-    return [];
+    return { results: [], text: '' };
   }
 }
 

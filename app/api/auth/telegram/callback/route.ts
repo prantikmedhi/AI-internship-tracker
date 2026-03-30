@@ -12,7 +12,7 @@ import { consumePKCEByState } from '@/lib/stores/pkce-store';
 import { exchangeCodeForToken, getNotionUserInfo } from '@/lib/notion/oauth';
 import { storeTelegramSession, getTelegramSession } from '@/lib/telegram-session';
 import { createMCPClient } from '@/lib/mcp/client';
-import { searchWorkspace } from '@/lib/mcp/tools';
+import { ensureWorkspaceStructure } from '@/lib/notion/workspace-setup';
 
 export async function GET(request: NextRequest) {
   try {
@@ -97,9 +97,9 @@ export async function GET(request: NextRequest) {
       lastLocation: '',
     });
     
-    // Asynchronous Auto-Tracker Setup
+    // Asynchronous Workspace Auto-Setup
     // Send immediate response to browser, handle setup in background
-    Promise.resolve().then(async () => {
+    ;(async () => {
       try {
         const botToken = process.env.TELEGRAM_BOT_TOKEN;
         const sendTgMsg = async (text: string) => {
@@ -111,68 +111,46 @@ export async function GET(request: NextRequest) {
           }).catch(console.error);
         };
 
-        await sendTgMsg('⚙️ Login successful! Auto-discovering Notion Workspace to build your Internship Tracker...');
-        
+        await sendTgMsg('⚙️ Setting up your AI Internship Agent workspace...');
+
         const client = createMCPClient(tokenResponse.access_token);
-        const results = await searchWorkspace(client, '', 'last_edited_time');
-        
-        const candidate = results.find(r => r.id);
-        if (!candidate || !candidate.id) {
-          await sendTgMsg('❌ Could not auto-discover any Pages. Please make sure you shared a Page with your Integration, then use /setup_tracker <URL>.');
-          return;
-        }
+        const ids = await ensureWorkspaceStructure(client);
 
-        const pageId = candidate.id;
-        await sendTgMsg(`🎯 Found parent page: "${candidate.title || 'Untitled'}". Generating database...`);
-
-        const schema = {
-          "Role": { "title": {} },
-          "Company": { "rich_text": {} },
-          "Location": { "rich_text": {} },
-          "URL": { "url": {} },
-          "Source": {
-            "select": {
-              "options": [
-                { "name": "LinkedIn", "color": "blue" },
-                { "name": "Internshala", "color": "purple" },
-                { "name": "RemoteOK", "color": "gray" },
-                { "name": "Other", "color": "default" }
-              ]
-            }
-          },
-          "Status": {
-            "select": {
-              "options": [
-                { "name": "Discovered", "color": "yellow" },
-                { "name": "Applied", "color": "blue" },
-                { "name": "Interviewing", "color": "orange" },
-                { "name": "Rejected", "color": "red" },
-                { "name": "Offer", "color": "green" }
-              ]
-            }
-          },
-          "Date Added": { "date": {} },
-          "Applied": { "checkbox": {} }
-        };
-
-        const result = await client.callTool<{ id: string }>('notion-create-database', {
-          parent: { page_id: pageId },
-          title: [{ type: 'text', text: { content: "Internship Tracker" } }],
-          properties: schema,
-        });
-
-        if (result && result.id) {
+        if (ids) {
           const updatedSession = getTelegramSession(telegramUserId);
           if (updatedSession) {
-            updatedSession.trackerDatabaseId = result.id;
+            Object.assign(updatedSession, ids);
             storeTelegramSession(telegramUserId, updatedSession);
           }
-          await sendTgMsg('✅ Database created! You can now send /search <keyword> to automatically fill it!');
+          await sendTgMsg(
+            '✅ Workspace ready!\n\n' +
+            'Your Notion now has:\n' +
+            '• About Me, Skills, Projects, Resume, Preferences pages\n' +
+            '• Internship Tracker database\n\n' +
+            'Fill in your profile pages, then send /search <keyword> to find jobs!'
+          );
+        } else {
+          await sendTgMsg('⚠️ Could not set up workspace. Make sure you shared a page with the Notion integration, then use /setup_tracker <URL>.');
         }
       } catch (err) {
-        console.error('Auto-setup error:', err);
+        console.error('[workspace-setup] Auto-setup error:', err);
+        try {
+          const botToken = process.env.TELEGRAM_BOT_TOKEN;
+          if (botToken) {
+            await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                chat_id: telegramUserId,
+                text: '⚠️ Workspace setup failed. Use /setup_tracker to continue.'
+              })
+            }).catch(console.error);
+          }
+        } catch (e) {
+          console.error('Failed to send error message to Telegram:', e);
+        }
       }
-    });
+    })();
 
     // Return HTML page the user sees in their browser
     return new NextResponse(

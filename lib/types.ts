@@ -67,6 +67,15 @@ export interface TelegramSession {
   lastQuery: string;
   lastLocation: string;
   trackerDatabaseId?: string;
+  profilePageId?: string;
+
+  // Workspace structure IDs (populated by ensureWorkspaceStructure)
+  rootPageId?: string;
+  aboutMePageId?: string;
+  skillsPageId?: string;
+  projectsPageId?: string;
+  resumePageId?: string;
+  preferencesPageId?: string;
 }
 
 // Notion Database Row Type
@@ -76,13 +85,15 @@ export interface InternshipTrackerRow {
   Role: string;
   'Apply URL': string;
   Location: string;
-  Status: 'To Apply' | 'Applied' | 'Rejected' | 'Under Review' | 'Accepted' | 'Negotiating';
+  Status: 'Discovered' | 'Applied' | 'Interviewing' | 'Rejected' | 'Offer';
   'Priority Score': number;
   'Matched Skills': string[];
   'Missing Skills': string[];
   'Why This Fits': string;
   'Blocker Reason'?: string;
   'Apply Timestamp'?: string;
+  Source?: 'linkedin' | 'internshala' | 'remoteok';
+  Applied?: boolean;
 }
 
 // OAuth Types

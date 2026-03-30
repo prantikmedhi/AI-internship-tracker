@@ -21,5 +21,6 @@ export async function getWorkspaceOverview(client: MCPClient): Promise<Workspace
 
 export async function searchWorkspace(client: MCPClient, query: string): Promise<any[]> {
   // Delegate to tools
-  return searchWorkspaceFromTools(client, query);
+  const { results } = await searchWorkspaceFromTools(client, query);
+  return results;
 }

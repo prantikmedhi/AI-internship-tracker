@@ -5,7 +5,7 @@
 
 import { BotContext } from '../session';
 import { MCPClient } from '../../lib/mcp/client';
-import { TelegramSession } from '../../lib/types';
+import { TelegramSession, RankedJob } from '../../lib/types';
 import { extractSearchKeywords } from '../../lib/llm/extraction';
 import { scrapeAllSources } from '../../lib/jobs/scraper';
 import { filterLiveListings, normalizeListings } from '../../lib/jobs/normalize';
@@ -44,16 +44,29 @@ export async function handleInternshipQuery(
 
   try {
     let statusMsg = await ctx.reply('⏳ Processing your request...');
+    const chatId = ctx.chat?.id;
     const editMessage = async (step: string) => {
       try {
-        await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, step);
+        if (chatId) {
+          await ctx.api.editMessageText(chatId, statusMsg.message_id, step);
+        }
       } catch (e) {
         // Ignore edit errors
       }
     };
 
-    // Step 1: Extract keywords from user message
-    await editMessage('1️⃣ Analyzing your request...');
+    // Step 1: Get user profile for ranking
+    await editMessage('1️⃣ Reading your profile...');
+    let profile;
+    try {
+      profile = await getUserProfile(client, session.workspace || '');
+    } catch (e) {
+      // Continue without profile
+      profile = undefined;
+    }
+
+    // Step 2: Extract keywords from user message
+    await editMessage('2️⃣ Analyzing your request...');
 
     // Create a minimal profile for extraction if profile doesn't exist
     const profileForExtraction = profile || {
@@ -71,23 +84,13 @@ export async function handleInternshipQuery(
     const keywords = await extractSearchKeywords(profileForExtraction, text);
     const { keyword, location } = keywords;
 
-    await editMessage(`2️⃣ Searching for: "${keyword}" in ${location || 'any location'}...`);
+    await editMessage(`3️⃣ Searching for: "${keyword}" in ${location || 'any location'}...`);
 
-    // Step 2: Get user profile for ranking
-    let profile;
-    try {
-      await editMessage('3️⃣ Reading your profile...');
-      profile = await getUserProfile(client, session.workspace);
-    } catch (e) {
-      // Continue without profile
-      profile = undefined;
-    }
-
-    // Step 3: Scrape jobs from all sources
+    // Step 4: Scrape jobs from all sources
     await editMessage('4️⃣ Scraping job listings...');
     let allJobs = await scrapeAllSources(keyword, location);
 
-    // Step 4: Filter and normalize
+    // Step 5: Filter and normalize
     await editMessage('5️⃣ Filtering and normalizing results...');
     allJobs = await normalizeListings(allJobs);
 
@@ -97,7 +100,7 @@ export async function handleInternshipQuery(
       return;
     }
 
-    // Step 5: Rank jobs against user profile
+    // Step 6: Rank jobs against user profile
     await editMessage(`6️⃣ Ranking ${totalFound} jobs against your profile...`);
     let rankedJobs: RankedJob[];
     if (profile) {
@@ -133,11 +136,13 @@ export async function handleInternshipQuery(
       resultText += `\n... and ${rankedJobs.length - 5} more internships.`;
     }
 
-    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, resultText, {
-      parse_mode: 'Markdown',
-    });
+    if (chatId) {
+      await ctx.api.editMessageText(chatId, statusMsg.message_id, resultText, {
+        parse_mode: 'Markdown',
+      });
+    }
 
-    // Step 7: Save results to session
+    // Step 8: Save results to session
     await editMessage('8️⃣ Saving results to session...');
     ctx.session.lastResults = rankedJobs;
     ctx.session.lastQuery = keyword;

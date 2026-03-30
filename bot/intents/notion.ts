@@ -80,7 +80,7 @@ export async function handleNotionQuery(
 
     let statusMsg = await ctx.reply(`🔍 Searching for "${searchQuery}"...`);
 
-    const results = await searchWorkspace(client, searchQuery);
+    const { results } = await searchWorkspace(client, searchQuery);
 
     if (results.length === 0) {
       await ctx.api.editMessageText(
@@ -107,8 +107,19 @@ export async function handleNotionQuery(
       parse_mode: 'Markdown',
     });
 
-    // Store results in session
-    ctx.session.lastResults = results;
+    // Store results in session (cast search results to RankedJob format)
+    ctx.session.lastResults = results.map((r) => ({
+      company: r.title || 'Unknown',
+      role: '',
+      location: '',
+      description: '',
+      url: r.url || '',
+      source: 'linkedin' as const,
+      priorityScore: 0,
+      matchedSkills: [],
+      missingSkills: [],
+      whyFits: '',
+    }));
     ctx.session.lastQuery = searchQuery;
   } catch (error) {
     console.error('Notion query error:', error);

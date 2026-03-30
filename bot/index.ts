@@ -33,6 +33,7 @@ import {
   workspaceHandler,
   logoutHandler,
   setupTrackerHandler,
+  setupHandler,
 } from './handlers/commands';
 import { messageHandler } from './handlers/messages';
 
@@ -40,6 +41,7 @@ import { messageHandler } from './handlers/messages';
 bot.command('start', startHandler);
 bot.command('help', helpHandler);
 bot.command('search', searchHandler);
+bot.command('setup', setupHandler);
 bot.command('setup_tracker', setupTrackerHandler);
 bot.command('read', readHandler);
 bot.command('profile', profileHandler);

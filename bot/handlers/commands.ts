@@ -15,9 +15,11 @@ import {
   generateTelegramOAuthUrl,
   formatOAuthUrlForTelegram,
 } from '../../lib/notion/telegram-oauth';
+import type { RankedJob, JobListing } from '../../lib/types';
 import { searchWorkspace, fetchPage } from '../../lib/mcp/tools';
 import { getUserProfile } from '../../lib/notion/profile';
 import { getWorkspaceOverview } from '../../lib/notion/workspace';
+import { ensureInternshipTracker, ensureProfilePage, ensureWorkspaceStructure } from '../../lib/notion/workspace-setup';
 
 // /start command - welcome and authentication
 export async function startHandler(ctx: BotContext) {
@@ -30,6 +32,70 @@ export async function startHandler(ctx: BotContext) {
   const isAuth = isTelegramUserAuthenticated(userId);
 
   if (isAuth) {
+    const session = getTelegramSession(userId);
+
+    // For users who authenticated before workspace-setup feature, trigger setup
+    if (session?.notionToken && !session.rootPageId) {
+      const client = createMCPClient(session.notionToken);
+      const chatId = ctx.chat?.id;
+      const setupMsg = await ctx.reply('⚙️ Setting up your workspace for the first time...');
+
+      // Add a timeout to prevent being stuck forever (increased to 60s for multi-page creation)
+      const timeoutPromise = new Promise<null>((_, reject) => 
+        setTimeout(() => reject(new Error('Setup timeout (60s exceeded)')), 60000)
+      );
+
+      Promise.race([
+        ensureWorkspaceStructure(client, {
+          existingIds: {
+            trackerDatabaseId: session.trackerDatabaseId,
+            aboutMePageId: session.aboutMePageId,
+            skillsPageId: session.skillsPageId,
+            projectsPageId: session.projectsPageId,
+            resumePageId: session.resumePageId,
+            preferencesPageId: session.preferencesPageId,
+          }
+        }),
+        timeoutPromise
+      ]).then(ids => {
+        if (ids) {
+          Object.assign(session, ids);
+          storeTelegramSession(userId, session);
+          if (chatId) {
+            ctx.api.editMessageText(chatId, setupMsg.message_id,
+              '✅ Workspace ready! Fill your profile pages in Notion, then use /search <keyword>.'
+            ).catch(() => {});
+          }
+        } else {
+          if (chatId) {
+            ctx.api.editMessageText(chatId, setupMsg.message_id,
+              '⚠️ Automatic workspace setup failed.\n\n' +
+              'The integration needs permission to access your Notion pages.\n\n' +
+              '**📋 Quick Setup (3 steps):**\n' +
+              '1️⃣ Open Notion in your browser\n' +
+              '2️⃣ Go to any page → "…" (top-right) → "Add connections"\n' +
+              '3️⃣ Search for your bot → Grant access\n\n' +
+              'Then try `/start` again.\n\n' +
+              '**Or use manual setup:**\n' +
+              'After sharing a page, send: `/setup <page_url>`\n' +
+              'Example: `/setup https://www.notion.so/My-Dashboard-abc123`',
+              { parse_mode: 'Markdown' }
+            ).catch(() => {});
+          }
+        }
+      }).catch(err => {
+        console.error('Workspace setup error:', err);
+        if (chatId) {
+          ctx.api.editMessageText(chatId, setupMsg.message_id,
+            `❌ Error during workspace setup: ${err.message || 'Unknown error'}.\n\n` +
+            'Try manual setup: `/setup <Notion_Page_URL>`',
+            { parse_mode: 'Markdown' }
+          ).catch(() => {});
+        }
+      });
+      return;
+    }
+
     await ctx.reply(
       '👋 Welcome back! You are authenticated with Notion.\n\n' +
       'Available commands:\n' +
@@ -57,6 +123,83 @@ export async function startHandler(ctx: BotContext) {
   }
 }
 
+// /setup command - manual workspace setup with URL
+export async function setupHandler(ctx: BotContext) {
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  if (!isTelegramUserAuthenticated(userId)) {
+    await ctx.reply('🔐 Please authenticate first with /start');
+    return;
+  }
+
+  const session = getTelegramSession(userId);
+  if (!session?.notionToken) return;
+  const client = createMCPClient(session.notionToken);
+
+  const chatId = ctx.chat?.id;
+  if (!chatId) return;
+
+  const matchStr = Array.isArray(ctx.match) ? ctx.match.join(' ') : String(ctx.match || '');
+  const url = matchStr.trim();
+  
+  if (!url || !url.includes('notion.so/')) {
+    await ctx.reply(
+      '❌ Invalid command format.\n\n' +
+      '**Usage:** `/setup <page-url>`\n\n' +
+      '**Steps:**\n' +
+      '1. Share a page with the bot in Notion (click "…" → "Add connections")\n' +
+      '2. Copy that page URL from your browser\n' +
+      '3. Send: `/setup <pasted-url>`\n\n' +
+      '**Example:**\n' +
+      '`/setup https://www.notion.so/My-Dashboard-a1b2c3d4e5f6`',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  // Extract UUID from URL
+  const uuidMatch = url.match(/([a-f0-9]{32})/i) || url.match(/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i);
+  if (!uuidMatch) {
+    await ctx.reply('❌ Invalid Notion URL. Could not extract Page ID.');
+    return;
+  }
+  let rawId = uuidMatch[1].replace(/-/g, '');
+  const parentPageId = `${rawId.substr(0,8)}-${rawId.substr(8,4)}-${rawId.substr(12,4)}-${rawId.substr(16,4)}-${rawId.substr(20)}`;
+
+  const setupMsg = await ctx.reply('⚙️ Setting up your workspace under the provided page...');
+
+  try {
+    const ids = await ensureWorkspaceStructure(client, {
+      existingIds: {
+        trackerDatabaseId: session.trackerDatabaseId,
+        aboutMePageId: session.aboutMePageId,
+        skillsPageId: session.skillsPageId,
+        projectsPageId: session.projectsPageId,
+        resumePageId: session.resumePageId,
+        preferencesPageId: session.preferencesPageId,
+      },
+      parentPageId
+    });
+
+    if (ids) {
+      Object.assign(session, ids);
+      storeTelegramSession(userId, session);
+      await ctx.api.editMessageText(chatId, setupMsg.message_id,
+        '✅ Workspace ready! Your AI Internship Agent root page and sub-pages have been created under the page you provided.'
+      );
+    } else {
+      await ctx.api.editMessageText(chatId, setupMsg.message_id,
+        '❌ Setup failed. Please make sure the integration has access to the page you provided (click "Add connections" in Notion).'
+      );
+    }
+  } catch (err) {
+    console.error('Manual setup error:', err);
+    await ctx.api.editMessageText(chatId, setupMsg.message_id,
+      `❌ Error during setup: ${(err as Error).message}`
+    );
+  }
+}
+
 // /help command
 export async function helpHandler(ctx: BotContext) {
   const commands = `
@@ -74,6 +217,7 @@ Example: /search python india
 /read <query> - Search your workspace
 /profile - Show your profile summary
 /workspace - Show workspace overview
+/setup <url> - Manual workspace setup if auto-discovery fails
 
 **Direct Message Support:**
 Just write naturally:
@@ -122,67 +266,250 @@ export async function searchHandler(ctx: BotContext) {
       return;
     }
 
-    // Step 1: Scrape external sources
-    await ctx.api.editMessageText(chatId, statusMsg.message_id, '1️⃣ Scraping external sources...');
-    
-    // Extract keyword and optional location
-    const parts = query.split(' ');
-    const keyword = parts[0];
-    const location = parts.length > 1 ? parts.slice(1).join(' ') : 'remote';
-    
-    // Import scrapeAllSources
-    const { scrapeAllSources } = await import('../../lib/jobs/scraper');
-    const jobs = await scrapeAllSources(keyword, location);
-    
-    if (jobs.length === 0) {
-      await ctx.api.editMessageText(chatId, statusMsg.message_id, `❌ No jobs found for "${query}".`);
+    // Step 1: Read user profile from Notion pages
+    await ctx.api.editMessageText(chatId, statusMsg.message_id, '1️⃣ Reading your profile from Notion...');
+    const profile = await getUserProfile(client, session.workspace || '', {
+      aboutMePageId: session.aboutMePageId,
+      skillsPageId: session.skillsPageId,
+      projectsPageId: session.projectsPageId,
+      resumePageId: session.resumePageId,
+      preferencesPageId: session.preferencesPageId,
+    }).catch(() => undefined);
+
+    // Step 2: Parse location from query, then optionally refine with LLM
+
+    // Regex pre-parser: handles "... in <City>", "... at <City>" patterns reliably
+    function parseQueryParts(raw: string): { keyword: string; location: string } {
+      const inMatch = raw.match(/^(.*?)\s+in\s+([A-Za-z][A-Za-z\s,]+)$/i);
+      if (inMatch) return { keyword: inMatch[1].trim(), location: inMatch[2].trim() };
+      const atMatch = raw.match(/^(.*?)\s+at\s+([A-Za-z][A-Za-z\s,]+)$/i);
+      if (atMatch) return { keyword: atMatch[1].trim(), location: atMatch[2].trim() };
+      return { keyword: raw, location: '' };
+    }
+
+    const parsed = parseQueryParts(query);
+
+    // Step 2a: Optionally refine keyword/location with LLM (fails silently — regex values used as fallback)
+    let keyword = parsed.keyword;
+    let location = parsed.location || 'remote';
+    try {
+      const { extractSearchKeywords } = await import('../../lib/llm/extraction');
+      const kw = profile ? await extractSearchKeywords(profile, query).catch(() => null) : null;
+      if (kw?.keyword) keyword = kw.keyword;
+      if (kw?.location) location = kw.location;
+    } catch {
+      // LLM module unavailable — use regex-parsed values above
+    }
+
+    // Step 2b: If keyword is generic (just "internship", "new", etc.), derive from profile
+    // so the scraper fetches jobs actually relevant to the user's skills.
+    const FILLER = new Set(['internship', 'internships', 'job', 'jobs', 'new', 'find', 'search', 'get', 'show', 'me', 'a', 'an', 'the', '']);
+    const substantive = keyword.toLowerCase().split(/\s+/).filter(w => !FILLER.has(w));
+    if (substantive.length === 0 && profile) {
+      const prefRole = (profile.preferences as Record<string, string>)?.preferredRole?.trim();
+      const topSkills = profile.skills.slice(0, 2).join(' ');
+      keyword = prefRole || (topSkills ? `${topSkills} developer` : 'software engineer');
+      console.log(`[search] Generic query — using profile keyword: "${keyword}"`);
+    }
+
+    // Step 3: Scrape jobs from all sources
+    let jobs: JobListing[] = [];
+    try {
+      await ctx.api.editMessageText(
+        chatId,
+        statusMsg.message_id,
+        `2️⃣ Searching for "${keyword}" in ${location}...`
+      );
+      const { scrapeAllSources } = await import('../../lib/jobs/scraper');
+      jobs = await scrapeAllSources(keyword, location);
+    } catch (err) {
+      console.error('[search] Scraper failed:', err);
+      await ctx.api.editMessageText(
+        chatId,
+        statusMsg.message_id,
+        `❌ Job scraping failed.\n\nIf using Playwright make sure Chromium is installed:\n\`npx playwright install chromium\``
+      );
       return;
     }
-    
-    await ctx.api.editMessageText(chatId, statusMsg.message_id, `2️⃣ Found ${jobs.length} jobs. Formatting results...`);
-    
-    let response = `✅ Discovered ${jobs.length} internships:\n\n`;
-    jobs.slice(0, 5).forEach((job, i) => {
-      response += `${i + 1}. **${job.role}** at _${job.company}_\n📍 ${job.location}\n🌐 [Apply Link](${job.url})\n\n`;
-    });
-    if (jobs.length > 5) {
-      response += `\n... and ${jobs.length - 5} more`;
+
+    if (jobs.length === 0) {
+      await ctx.api.editMessageText(chatId, statusMsg.message_id, `❌ No jobs found for "${keyword}" in ${location}.`);
+      return;
     }
-    
+
+    if (!profile || profile.skills.length === 0) {
+      await ctx.api.editMessageText(
+        chatId,
+        statusMsg.message_id,
+        `⚠️ Your profile has no skills listed.\n\n` +
+        `Please fill in your *Skills* page on Notion with your skills (e.g. "Skills: Python, React, Node.js"), then search again.\n\n` +
+        `Use /profile to check what was read from your pages.`,
+        { parse_mode: 'Markdown' }
+      );
+      return;
+    }
+
+    // Step 4: Rank jobs against user profile
+    let allRanked: RankedJob[] = [];
+    try {
+      await ctx.api.editMessageText(
+        chatId,
+        statusMsg.message_id,
+        `3️⃣ Ranking ${jobs.length} jobs against your profile...`
+      );
+      const { rankJobs } = await import('../../lib/llm/ranking');
+      allRanked = await rankJobs(profile, jobs);
+    } catch (err) {
+      console.error('[search] Ranking failed, using keyword fallback:', err);
+      // Keyword-match fallback — search still works even if LLM module fails
+      allRanked = jobs.map((j) => {
+        const hay = (j.role + ' ' + j.description + ' ' + (j.tags ?? []).join(' ')).toLowerCase();
+        const matched = profile.skills.filter(s => hay.includes(s.toLowerCase()));
+        return {
+          ...j,
+          priorityScore: matched.length > 0 ? 40 + matched.length * 8 : 0,
+          matchedSkills: matched,
+          missingSkills: profile.skills.filter(s => !matched.includes(s)).slice(0, 4),
+          whyFits: matched.length > 0 ? `Matched skills: ${matched.join(', ')}` : 'No skill overlap',
+        };
+      });
+    }
+
+    // Filter: only jobs with at least one matched skill AND score >= 40
+    let rankedJobs = allRanked.filter(j => j.matchedSkills.length > 0 && j.priorityScore >= 40);
+
+    // Apply preferred location filter from profile preferences
+    const prefLocation = (profile.preferences as Record<string, string>)?.preferredLocation;
+    if (prefLocation && prefLocation.toLowerCase() !== 'any') {
+      const locationFiltered = rankedJobs.filter(j =>
+        j.location.toLowerCase().includes(prefLocation.toLowerCase()) ||
+        j.location.toLowerCase().includes('remote')
+      );
+      if (locationFiltered.length > 0) rankedJobs = locationFiltered;
+    }
+
+    // Apply preferred role filter if set
+    const prefRole = (profile.preferences as Record<string, string>)?.preferredRole;
+    if (prefRole) {
+      const roleKeywords = prefRole.toLowerCase().split(/\s+/);
+      const roleFiltered = rankedJobs.filter(j =>
+        roleKeywords.some(kw => j.role.toLowerCase().includes(kw) || j.description.toLowerCase().includes(kw))
+      );
+      if (roleFiltered.length > 0) rankedJobs = roleFiltered;
+    }
+
+    if (rankedJobs.length === 0) {
+      await ctx.api.editMessageText(
+        chatId,
+        statusMsg.message_id,
+        `❌ No jobs matched your skills: *${profile.skills.slice(0, 5).join(', ')}*\n\n` +
+        `${prefLocation ? `📍 Preferred location: ${prefLocation}\n` : ''}` +
+        `${prefRole ? `💼 Preferred role: ${prefRole}\n\n` : '\n'}` +
+        `Try a different keyword or broaden your preferences in Notion.`,
+        { parse_mode: 'Markdown' }
+      );
+      return;
+    }
+
+    // Sort by priority score descending, take top 10
+    rankedJobs.sort((a, b) => b.priorityScore - a.priorityScore);
+    const topJobs = rankedJobs.slice(0, 10);
+
+    // Step 5: Format and display results
+    let response =
+      `✅ *${topJobs.length} matching internship${topJobs.length > 1 ? 's' : ''}* for your profile\n` +
+      `🎯 Skills: ${profile.skills.slice(0, 4).join(', ')}\n` +
+      `${prefLocation ? `📍 Location: ${prefLocation}\n` : ''}` +
+      `\n`;
+
+    topJobs.slice(0, 5).forEach((job, i) => {
+      response += `${i + 1}. *${job.role}* — ${job.company}\n`;
+      response += `   📍 ${job.location} | Score: ${job.priorityScore}\n`;
+      response += `   ✓ ${job.matchedSkills.slice(0, 3).join(', ')}\n`;
+      response += `   [Apply](${job.url})\n\n`;
+    });
+    if (topJobs.length > 5) {
+      response += `_...and ${topJobs.length - 5} more saved to your tracker_`;
+    }
+
     await ctx.api.editMessageText(chatId, statusMsg.message_id, response, { parse_mode: 'Markdown' });
-    
-    // Background auto-save to Notion
+
+    // Step 6: Ensure workspace structure exists
+    if (!session.rootPageId) {
+      await ctx.api.editMessageText(chatId, statusMsg.message_id, `${response}\n\n⚙️ Setting up your workspace...`);
+      const ids = await ensureWorkspaceStructure(client, {
+        existingIds: {
+          trackerDatabaseId: session.trackerDatabaseId,
+          aboutMePageId: session.aboutMePageId,
+          skillsPageId: session.skillsPageId,
+          projectsPageId: session.projectsPageId,
+          resumePageId: session.resumePageId,
+          preferencesPageId: session.preferencesPageId,
+        },
+      });
+      if (ids) {
+        Object.assign(session, ids);
+        storeTelegramSession(userId, session);
+      }
+    } else if (!session.trackerDatabaseId) {
+      // Fallback for users with root page but no tracker DB
+      const trackerId = await ensureInternshipTracker(client);
+      if (trackerId) {
+        session.trackerDatabaseId = trackerId;
+        storeTelegramSession(userId, session);
+      }
+    }
+
+    // Step 7: Auto-save to tracker if it exists (with extended columns)
     if (session.trackerDatabaseId) {
-      const dbStatusMsg = await ctx.reply('⏳ Auto-saving to your Notion Internship Tracker...');
+      const dbStatusMsg = await ctx.reply('💾 Auto-saving to your Internship Tracker...');
       let savedCount = 0;
-      for (const job of jobs.slice(0, 10)) { // Limit to top 10
+      for (const job of topJobs) {
         try {
+          const sourceLabel =
+            job.source === 'linkedin'
+              ? 'LinkedIn'
+              : job.source === 'internshala'
+                ? 'Internshala'
+                : job.source === 'remoteok'
+                  ? 'RemoteOK'
+                  : 'Other';
+
           const props = {
-            "Role": { title: [{ text: { content: job.role.substring(0, 2000) } }] },
-            "Company": { rich_text: [{ text: { content: job.company.substring(0, 2000) } }] },
-            "Location": { rich_text: [{ text: { content: job.location.substring(0, 2000) } }] },
-            "URL": { url: job.url },
-            "Source": { select: { name: ["linkedin", "internshala", "remoteok"].includes(job.source) ? (job.source.toLowerCase() === 'linkedin' ? 'LinkedIn' : job.source.toLowerCase() === 'internshala' ? 'Internshala' : 'RemoteOK') : 'Other' } },
-            "Status": { select: { name: "Discovered" } },
-            "Date Added": { date: { start: new Date().toISOString() } }
+            Role: { title: [{ text: { content: job.role.substring(0, 2000) } }] },
+            Company: { rich_text: [{ text: { content: job.company.substring(0, 2000) } }] },
+            Location: { rich_text: [{ text: { content: job.location.substring(0, 2000) } }] },
+            'Apply URL': { url: job.url },
+            Source: { select: { name: sourceLabel } },
+            Status: { select: { name: 'Discovered' } },
+            'Date Added': { date: { start: new Date().toISOString() } },
+            Applied: { checkbox: false },
+            'Priority Score': { number: job.priorityScore || 0 },
+            'Matched Skills': { rich_text: [{ text: { content: (job.matchedSkills || []).join(', ').substring(0, 2000) } }] },
+            'Missing Skills': { rich_text: [{ text: { content: (job.missingSkills || []).join(', ').substring(0, 2000) } }] },
+            'Why This Fits': { rich_text: [{ text: { content: (job.whyFits || '').substring(0, 2000) } }] },
+            'Blocker Reason': { rich_text: [{ text: { content: (job.blocker || '').substring(0, 2000) } }] },
           };
-          
+
           await client.callTool('notion-create-pages', {
             parent: { database_id: session.trackerDatabaseId },
-            properties: props
+            properties: props,
           });
           savedCount++;
         } catch (err) {
           console.error(`Failed to save job ${job.role}:`, err);
         }
       }
-      await ctx.api.editMessageText(chatId, dbStatusMsg.message_id, `✅ Successfully saved ${savedCount} jobs to your tracker database!`);
-    } else {
-      await ctx.reply('💡 Tip: Send /setup_tracker <Notion_Page_URL> to auto-save these jobs to your workspace next time!');
+      await ctx.api.editMessageText(
+        chatId,
+        dbStatusMsg.message_id,
+        `✅ Saved ${savedCount} ranked jobs to your Internship Tracker!`
+      );
     }
-    
-    ctx.session.lastResults = jobs as any;
-    ctx.session.lastQuery = query;
+
+    ctx.session.lastResults = topJobs;
+    ctx.session.lastQuery = keyword;
+    ctx.session.lastLocation = location;
   } catch (error) {
     console.error('Search error:', error);
     await ctx.reply('❌ Search failed. Please try again.');
@@ -208,12 +535,23 @@ export async function setupTrackerHandler(ctx: BotContext) {
   // Handle potential Grammy match object vs simple string
   const matchStr = Array.isArray(ctx.match) ? ctx.match.join(' ') : String(ctx.match || '');
   const url = matchStr.trim();
-  
+
   let pageId = '';
 
   if (url) {
     if (!url.includes('notion.so/')) {
-      await ctx.reply('Usage: /setup_tracker <Notion_Page_URL>\nExample: /setup_tracker https://notion.so/My-Dashboard-a1b2...');
+      await ctx.reply(
+        '❌ Invalid command format.\n\n' +
+        '**Usage:** `/setup_tracker <page-url>`\n\n' +
+        '**Steps:**\n' +
+        '1. Share a page with the bot in Notion (click "…" → "Add connections")\n' +
+        '2. Copy that page URL from your browser\n' +
+        '3. Send: `/setup_tracker <pasted-url>`\n\n' +
+        'This will create the full workspace structure under that page.\n\n' +
+        '**Example:**\n' +
+        '`/setup_tracker https://www.notion.so/My-Dashboard-a1b2c3d4e5f6`',
+        { parse_mode: 'Markdown' }
+      );
       return;
     }
     // Extract UUID from URL
@@ -224,76 +562,58 @@ export async function setupTrackerHandler(ctx: BotContext) {
     }
     let rawId = match[1].replace(/-/g, '');
     pageId = `${rawId.substr(0,8)}-${rawId.substr(8,4)}-${rawId.substr(12,4)}-${rawId.substr(16,4)}-${rawId.substr(20)}`;
-  } else {
-    // Auto-discover the first page available in the workspace
-    await ctx.reply('🔍 Auto-discovering Notion Workspace...');
-    const { searchWorkspace } = await import('../../lib/mcp/tools');
-    const results = await searchWorkspace(client, '', 'last_edited_time');
-    
-    // Natively, `notion-search` returns results. They might have an `id` or `url` containing the ID.
-    // We try to find any item that has an id
-    const candidate = results.find(r => r.id);
-    if (candidate && candidate.id) {
-       pageId = candidate.id;
-       await ctx.reply(`🎯 Found candidate page (${candidate.title || 'Untitled'}). Generating Database inside it...`);
-    } else {
-       await ctx.reply('❌ Could not auto-discover any Pages. Make sure you shared a Page with your Integration. Try providing a direct URL: /setup_tracker <URL>.');
-       return;
-    }
   }
-  
+
   try {
-    const statusMsg = await ctx.reply('⚙️ Creating Internship Tracker database...');
-    
-    const schema = {
-      "Role": { "title": {} },
-      "Company": { "rich_text": {} },
-      "Location": { "rich_text": {} },
-      "URL": { "url": {} },
-      "Source": {
-        "select": {
-          "options": [
-            { "name": "LinkedIn", "color": "blue" },
-            { "name": "Internshala", "color": "purple" },
-            { "name": "RemoteOK", "color": "gray" },
-            { "name": "Other", "color": "default" }
-          ]
-        }
-      },
-      "Status": {
-        "select": {
-          "options": [
-            { "name": "Discovered", "color": "yellow" },
-            { "name": "Applied", "color": "blue" },
-            { "name": "Interviewing", "color": "orange" },
-            { "name": "Rejected", "color": "red" },
-            { "name": "Offer", "color": "green" }
-          ]
-        }
-      },
-      "Date Added": { "date": {} },
-      "Applied": { "checkbox": {} }
-    };
-    
-    const result = await client.callTool<{ id: string }>('notion-create-database', {
-      parent: { page_id: pageId },
-      title: [{ type: 'text', text: { content: "Internship Tracker" } }],
-      properties: schema,
+    const statusMsg = await ctx.reply('⚙️ Setting up your full AI Internship Agent workspace (root page, profile pages, and tracker database)...');
+
+    const ids = await ensureWorkspaceStructure(client, { 
+      parentPageId: pageId || undefined,
+      existingIds: {
+        rootPageId: session.rootPageId,
+        aboutMePageId: session.aboutMePageId,
+        skillsPageId: session.skillsPageId,
+        projectsPageId: session.projectsPageId,
+        resumePageId: session.resumePageId,
+        preferencesPageId: session.preferencesPageId,
+        trackerDatabaseId: session.trackerDatabaseId,
+      }
     });
-    
-    if (result && result.id) {
-       session.trackerDatabaseId = result.id;
+
+    if (ids && ids.trackerDatabaseId) {
+       // Update session with ALL new IDs
+       Object.assign(session, ids);
        storeTelegramSession(userId, session);
-       await ctx.api.editMessageText(chatId, statusMsg.message_id, `✅ Success! Your Internship Tracker has been created.\n\nFrom now on, /search will automatically populate internships directly into this database!`);
+
+       await ctx.api.editMessageText(
+         chatId, 
+         statusMsg.message_id, 
+         `✅ Success! Your AI Internship Agent workspace has been established.\n\n` +
+         `Your Notion now has:\n` +
+         `• Root page: AI Internship Agent\n` +
+         `• 5 Profile pages (fill these for better matching)\n` +
+         `• Internship Tracker database\n\n` +
+         `From now on, /search will automatically populate internships into your tracker!`
+       );
     } else {
-       await ctx.api.editMessageText(chatId, statusMsg.message_id, `❌ Failed to create database. Make sure you have shared the Notion page with the integration!`);
+       await ctx.api.editMessageText(
+         chatId,
+         statusMsg.message_id,
+         `❌ Failed to establish workspace.\n\n` +
+         `**Possible reasons:**\n` +
+         `• The page wasn't shared with the bot (check "Add connections" in Notion)\n` +
+         `• The URL is invalid or not accessible\n\n` +
+         `**Try again:**\n` +
+         `1. Double-check that the page is shared with your bot\n` +
+         `2. Copy the page URL again\n` +
+         `3. Send: \`/setup_tracker <fresh-url>\``
+       );
     }
   } catch (error) {
     console.error('Setup tracker error:', error);
     await ctx.reply(`❌ Setup failed: ${(error as Error).message}`);
   }
 }
-
 // /read command
 export async function readHandler(ctx: BotContext) {
   const userId = ctx.from?.id;
@@ -336,7 +656,32 @@ export async function readHandler(ctx: BotContext) {
 
     let content = `📄 **Notion Page**\n\n`;
     if (typeof page === 'object' && page !== null && 'title' in page) {
-      content = `📄 **${(page.title as string) || 'Untitled'}**\n\n`;
+      let title = 'Untitled';
+      const pageTitle = (page as any).title;
+      if (typeof pageTitle === 'string') {
+        title = pageTitle;
+      } else if (
+        Array.isArray(pageTitle) &&
+        pageTitle.length > 0 &&
+        typeof pageTitle[0] === 'object' &&
+        'text' in pageTitle[0]
+      ) {
+        title = (pageTitle[0] as any).text?.content || 'Untitled';
+      }
+      content = `📄 **${title}**\n\n`;
+
+      // Fetch block children for actual page content
+      try {
+        const blockResult = await client.callTool<{ text?: string }>('notion-get-block-children', {
+          block_id: query,
+          page_size: 50
+        });
+        const bodyText = blockResult?.text || '(This page has no text content)';
+        content += bodyText;
+      } catch (err) {
+        console.warn('Could not fetch page blocks:', err);
+        content += '(Could not load page content)';
+      }
     }
 
     // Truncate if too long
@@ -383,7 +728,13 @@ export async function profileHandler(ctx: BotContext) {
     const client = createMCPClient(session.notionToken);
     let statusMsg = await ctx.reply('👤 Reading profile...');
 
-    const profile = await getUserProfile(client, session.workspace || '');
+    const profile = await getUserProfile(client, session.workspace || '', {
+      aboutMePageId: session.aboutMePageId,
+      skillsPageId: session.skillsPageId,
+      projectsPageId: session.projectsPageId,
+      resumePageId: session.resumePageId,
+      preferencesPageId: session.preferencesPageId,
+    });
 
     let content =
       `👤 **Your Profile**\n\n` +

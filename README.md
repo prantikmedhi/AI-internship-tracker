@@ -99,6 +99,29 @@ npm run bot:start
 
 ---
 
+## User Flow
+
+```mermaid
+flowchart TD
+    A([User opens Telegram]) --> B["/start command"]
+    B --> C[Bot sends Notion OAuth link]
+    C --> D([User clicks link & authorises on Notion])
+    D --> E[Next.js callback receives access token]
+    E --> F[Bot auto-creates workspace\nProfile page + Internship Tracker DB]
+    F --> G([User sends /find keyword location])
+    G --> H[Scraper fetches listings\nLinkedIn · Internshala · RemoteOK]
+    H --> I[LLM reads user profile from Notion]
+    I --> J[LLM ranks each listing\nagainst profile skills & preferences]
+    J --> K[Ranked results saved to\nNotion Internship Tracker DB]
+    K --> L([Bot sends ranked summary to user])
+    L --> M{User wants more?}
+    M -- /find again --> G
+    M -- /profile --> N([Bot shows Notion profile summary])
+    M -- Done --> O([User reviews results in Notion])
+```
+
+---
+
 ## Architecture
 
 ```

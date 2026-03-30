@@ -290,27 +290,48 @@ export async function searchHandler(ctx: BotContext) {
     const parsed = parseQueryParts(query);
 
     // Step 2a: Optionally refine keyword/location with LLM (fails silently — regex values used as fallback)
-    let keyword = parsed.keyword;
-    let location = parsed.location || 'remote';
+    // Step 2a: Extract location from query (LLM optional, regex already parsed above)
+    let location = parsed.location || '';
     try {
       const { extractSearchKeywords } = await import('../../lib/llm/extraction');
       const kw = profile ? await extractSearchKeywords(profile, query).catch(() => null) : null;
-      if (kw?.keyword) keyword = kw.keyword;
-      if (kw?.location) location = kw.location;
+      if (kw?.location && !parsed.location) location = kw.location;
     } catch {
-      // LLM module unavailable — use regex-parsed values above
+      // LLM unavailable — use regex-parsed location
     }
 
-    // Step 2b: If keyword is generic (just "internship", "new", etc.), derive from profile
-    // so the scraper fetches jobs actually relevant to the user's skills.
+    // Step 2b: Build the search keyword always from the user's actual skills + role.
+    // Skill-based keywords ("Python Java developer") return FAR more relevant results
+    // from scrapers than generic terms ("internship", "Full Stack Developer").
     const FILLER = new Set(['internship', 'internships', 'job', 'jobs', 'new', 'find', 'search', 'get', 'show', 'me', 'a', 'an', 'the', '']);
-    const substantive = keyword.toLowerCase().split(/\s+/).filter(w => !FILLER.has(w));
-    if (substantive.length === 0 && profile) {
-      const prefRole = (profile.preferences as Record<string, string>)?.preferredRole?.trim();
-      const topSkills = profile.skills.slice(0, 2).join(' ');
-      keyword = prefRole || (topSkills ? `${topSkills} developer` : 'software engineer');
-      console.log(`[search] Generic query — using profile keyword: "${keyword}"`);
+    const queryWords = parsed.keyword.toLowerCase().split(/\s+/).filter(w => !FILLER.has(w));
+    const prefRoleFromProfile = (profile?.preferences as Record<string, string>)?.preferredRole?.trim() || '';
+
+    let keyword: string;
+    if (queryWords.length > 0) {
+      // User gave a specific keyword (e.g. "python", "react") — keep it, append "developer" if needed
+      keyword = queryWords.join(' ');
+      if (!keyword.match(/developer|engineer|analyst|designer|scientist/i)) {
+        keyword += ' developer';
+      }
+    } else if (profile && profile.skills.length > 0) {
+      // Generic query — use top 2 skills as keyword so scraper fetches relevant jobs
+      const topSkills = profile.skills.slice(0, 2);
+      keyword = topSkills.join(' ') + ' developer';
+    } else if (prefRoleFromProfile) {
+      keyword = prefRoleFromProfile;
+    } else {
+      keyword = 'software developer';
     }
+
+    // Fall back location from profile preferences if not extracted from query
+    if (!location && profile) {
+      const prefLoc = (profile.preferences as Record<string, string>)?.preferredLocation?.trim();
+      if (prefLoc && prefLoc.toLowerCase() !== 'any') location = prefLoc;
+    }
+    if (!location) location = 'remote';
+
+    console.log(`[search] keyword="${keyword}" location="${location}"`);
 
     // Step 3: Scrape jobs from all sources
     let jobs: JobListing[] = [];
@@ -375,10 +396,15 @@ export async function searchHandler(ctx: BotContext) {
       });
     }
 
-    // Filter: only jobs with at least one matched skill AND score >= 40
-    let rankedJobs = allRanked.filter(j => j.matchedSkills.length > 0 && j.priorityScore >= 40);
+    allRanked.sort((a, b) => b.priorityScore - a.priorityScore);
 
-    // Apply preferred location filter from profile preferences
+    // Filter: only jobs where at least 1 skill matched (score > 0 means role inference or keyword found a match)
+    const withMatches = allRanked.filter(j => j.priorityScore > 0);
+    // Fallback: if truly nothing matched, show top 5 raw results with a note rather than an error
+    let rankedJobs = withMatches.length > 0 ? withMatches : allRanked.slice(0, 5);
+    const usedFallback = withMatches.length === 0;
+
+    // Soft location filter — never empties the list
     const prefLocation = (profile.preferences as Record<string, string>)?.preferredLocation;
     if (prefLocation && prefLocation.toLowerCase() !== 'any') {
       const locationFiltered = rankedJobs.filter(j =>
@@ -388,44 +414,24 @@ export async function searchHandler(ctx: BotContext) {
       if (locationFiltered.length > 0) rankedJobs = locationFiltered;
     }
 
-    // Apply preferred role filter if set
-    const prefRole = (profile.preferences as Record<string, string>)?.preferredRole;
-    if (prefRole) {
-      const roleKeywords = prefRole.toLowerCase().split(/\s+/);
-      const roleFiltered = rankedJobs.filter(j =>
-        roleKeywords.some(kw => j.role.toLowerCase().includes(kw) || j.description.toLowerCase().includes(kw))
-      );
-      if (roleFiltered.length > 0) rankedJobs = roleFiltered;
-    }
-
-    if (rankedJobs.length === 0) {
-      await ctx.api.editMessageText(
-        chatId,
-        statusMsg.message_id,
-        `❌ No jobs matched your skills: *${profile.skills.slice(0, 5).join(', ')}*\n\n` +
-        `${prefLocation ? `📍 Preferred location: ${prefLocation}\n` : ''}` +
-        `${prefRole ? `💼 Preferred role: ${prefRole}\n\n` : '\n'}` +
-        `Try a different keyword or broaden your preferences in Notion.`,
-        { parse_mode: 'Markdown' }
-      );
-      return;
-    }
-
-    // Sort by priority score descending, take top 10
-    rankedJobs.sort((a, b) => b.priorityScore - a.priorityScore);
     const topJobs = rankedJobs.slice(0, 10);
 
     // Step 5: Format and display results
-    let response =
-      `✅ *${topJobs.length} matching internship${topJobs.length > 1 ? 's' : ''}* for your profile\n` +
-      `🎯 Skills: ${profile.skills.slice(0, 4).join(', ')}\n` +
-      `${prefLocation ? `📍 Location: ${prefLocation}\n` : ''}` +
-      `\n`;
+    const prefRole = (profile.preferences as Record<string, string>)?.preferredRole;
+    let response = usedFallback
+      ? `⚠️ *No direct skill matches found.* Showing top results for "${keyword}" — update your Skills page in Notion for better matching.\n\n`
+      : `✅ *${topJobs.length} internship${topJobs.length > 1 ? 's' : ''} found* matching your profile\n` +
+        `🎯 Skills: ${profile.skills.slice(0, 4).join(', ')}\n` +
+        `${prefLocation ? `📍 Location: ${prefLocation}\n` : ''}` +
+        `${prefRole ? `💼 Role: ${prefRole}\n` : ''}` +
+        `\n`;
 
     topJobs.slice(0, 5).forEach((job, i) => {
       response += `${i + 1}. *${job.role}* — ${job.company}\n`;
       response += `   📍 ${job.location} | Score: ${job.priorityScore}\n`;
-      response += `   ✓ ${job.matchedSkills.slice(0, 3).join(', ')}\n`;
+      if (job.matchedSkills.length > 0) {
+        response += `   ✓ ${job.matchedSkills.slice(0, 3).join(', ')}\n`;
+      }
       response += `   [Apply](${job.url})\n\n`;
     });
     if (topJobs.length > 5) {

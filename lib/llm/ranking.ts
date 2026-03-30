@@ -54,12 +54,12 @@ export async function rankJob(
 const FRONTEND_ROLE = /frontend|front-end|front end|\bui\b|react\b|angular|vue|web dev/i;
 const BACKEND_ROLE  = /backend|back-end|back end|\bapi\b|\bserver\b|database|devops|cloud|infra|sre\b|platform/i;
 const FULLSTACK_ROLE = /full.?stack|software engineer|software developer|\bsde\b|\bswe\b|programmer|full stack dev/i;
-const DATA_ROLE     = /data (science|engineer|analyst)|machine learning|ml engineer|ai engineer|nlp|deep learning/i;
+const DATA_ROLE     = /data (science|engineer|analyst)|machine learning|ml engineer|\bai engineer|\bai intern|\bai\b.*intern|nlp|deep learning|generative ai|llm engineer/i;
 const MOBILE_ROLE   = /mobile|android|ios|flutter|react native/i;
 
 const FRONTEND_SKILLS = new Set(['react', 'next.js', 'nextjs', 'vue', 'angular', 'svelte', 'javascript', 'typescript', 'html', 'css', 'tailwind', 'redux', 'graphql', 'jquery']);
 const BACKEND_SKILLS  = new Set(['python', 'ruby', 'java', 'go', 'golang', 'node', 'nodejs', 'django', 'rails', 'flask', 'fastapi', 'express', 'spring', 'php', 'rust', 'c#', '.net', 'sql', 'postgresql', 'mysql', 'mongodb', 'redis', 'kafka', 'docker', 'kubernetes']);
-const DATA_SKILLS     = new Set(['python', 'r', 'sql', 'tensorflow', 'pytorch', 'pandas', 'numpy', 'scikit-learn', 'spark', 'tableau', 'powerbi', 'machine learning', 'deep learning', 'nlp']);
+const DATA_SKILLS     = new Set(['python', 'r', 'sql', 'tensorflow', 'pytorch', 'pandas', 'numpy', 'scikit-learn', 'spark', 'tableau', 'powerbi', 'machine learning', 'deep learning', 'nlp', 'ai systems', 'artificial intelligence', 'ai', 'ml', 'llm', 'generative ai', 'langchain']);
 const MOBILE_SKILLS   = new Set(['react native', 'flutter', 'swift', 'kotlin', 'android', 'ios', 'dart']);
 
 function inferMatchFromRole(role: string, skills: string[]): string[] {

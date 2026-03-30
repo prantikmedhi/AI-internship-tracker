@@ -517,8 +517,9 @@ export async function searchHandler(ctx: BotContext) {
     ctx.session.lastQuery = keyword;
     ctx.session.lastLocation = location;
   } catch (error) {
-    console.error('Search error:', error);
-    await ctx.reply('❌ Search failed. Please try again.');
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error('[search] OUTER CATCH:', msg, error);
+    await ctx.reply(`❌ Search failed: ${msg.slice(0, 200)}`);
   }
 }
 
